@@ -15,4 +15,4 @@ export type WorkflowSettings = { productGroups:string[];defaultShippingFee:numbe
 export type NotificationSettings = { dueSoon:boolean;unpaid:boolean;specialOccasion:boolean };
 export type StoreData = { customers:Customer[];recipients:CustomerRecipient[];events:CustomerEvent[];products:Product[];orders:Order[];payments:Payment[];invoices:Invoice[];staff:Staff[];production:ProductionTask[];deliveries:DeliveryTask[];logs:ActivityLog[];settings:{shop:ShopSettings;invoice:InvoiceSettings;workflow:WorkflowSettings;notifications:NotificationSettings} };
 export type ViewKey = "dashboard"|"orders"|"production"|"delivery"|"customers"|"occasions"|"products"|"invoices"|"payments"|"reports"|"staff"|"settings";
-export type AuthUser = { id:number;name:string;email:string;role:string;avatar:string };
+export type AuthUser = { id:string|number;name:string;email:string;role:string;avatar:string };

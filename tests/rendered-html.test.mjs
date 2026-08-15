@@ -28,15 +28,16 @@ test("server-renders the Floré authentication shell", async () => {
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
 
-test("ships the data-backed application configuration", async () => {
-  const [page, layout, packageJson, hosting, schema, migration, authMigration] = await Promise.all([
+test("ships the Firebase-backed application configuration", async () => {
+  const [page, layout, packageJson, hosting, firebaseClient, firebaseStore, rules, firebaseConfig] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../.openai/hosting.json", import.meta.url), "utf8"),
-    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
-    readFile(new URL("../drizzle/0000_milky_miss_america.sql", import.meta.url), "utf8"),
-    readFile(new URL("../drizzle/0002_shiny_giant_girl.sql", import.meta.url), "utf8"),
+    readFile(new URL("../app/firebase/client.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/firebase/store.ts", import.meta.url), "utf8"),
+    readFile(new URL("../firestore.rules", import.meta.url), "utf8"),
+    readFile(new URL("../firebase.json", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /<AuthGate \/>/);
@@ -44,17 +45,19 @@ test("ships the data-backed application configuration", async () => {
   assert.match(layout, /openGraph/);
   assert.match(packageJson, /"recharts"/);
   assert.match(packageJson, /"jspdf"/);
+  assert.match(packageJson, /"firebase"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   const hostingConfig = JSON.parse(hosting);
-  assert.equal(hostingConfig.d1, "DB");
-  assert.equal(hostingConfig.r2, "UPLOADS");
-  for (const table of ["authAccounts", "authSessions", "customers", "orders", "orderItems", "products", "payments", "invoices", "delivery", "productionTasks", "activityLogs", "settings"]) {
-    assert.match(schema, new RegExp(`export const ${table}`));
-  }
-  assert.match(migration, /CREATE TABLE `orders`/);
-  assert.match(migration, /FOREIGN KEY \(`customer_id`\)/);
-  assert.match(authMigration, /CREATE TABLE `auth_accounts`/);
-  assert.match(authMigration, /CREATE TABLE `auth_sessions`/);
+  assert.equal(hostingConfig.d1, null);
+  assert.equal(hostingConfig.r2, null);
+  assert.match(firebaseClient, /nananerospace/);
+  assert.match(firebaseClient, /kyEi7WdhTdZ7HfpI9PxxxVLbqNR2/);
+  assert.match(firebaseStore, /flore_stores/);
+  assert.match(firebaseStore, /loadFirebaseStore/);
+  assert.match(rules, /request\.auth\.uid/);
+  assert.match(rules, /flore_stores\/default/);
+  assert.match(firebaseConfig, /firestore\.rules/);
   await access(new URL("../public/og.png", import.meta.url));
   await assert.rejects(access(new URL("../app/_sites-preview", templateRoot)));
+  await assert.rejects(access(new URL("../app/api/store/route.ts", templateRoot)));
 });
