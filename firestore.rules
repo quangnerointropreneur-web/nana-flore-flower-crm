@@ -1,0 +1,18 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isFloreManager() {
+      return request.auth != null
+        && request.auth.uid == 'kyEi7WdhTdZ7HfpI9PxxxVLbqNR2';
+    }
+
+    match /flore_stores/default/{document=**} {
+      allow read, write: if isFloreManager();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
