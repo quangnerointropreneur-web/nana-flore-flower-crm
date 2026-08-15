@@ -1,0 +1,2 @@
+CREATE INDEX `idx_customer_events_customer_date` ON `customer_events` (`customer_id`,`event_date`);--> statement-breakpoint
+CREATE INDEX `idx_customer_recipients_customer_id` ON `customer_recipients` (`customer_id`);

@@ -8,6 +8,20 @@
       "when": 1786787631863,
       "tag": "0000_milky_miss_america",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1786813840609,
+      "tag": "0001_eminent_agent_zero",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786822388834,
+      "tag": "0002_shiny_giant_girl",
+      "breakpoints": true
     }
   ]
 }

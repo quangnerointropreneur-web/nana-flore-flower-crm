@@ -1,10 +1,15 @@
 import { env } from "cloudflare:workers";
+import { hashPassword } from "./auth";
 
 type D1ResultRow = Record<string, unknown>;
 
 const schemaStatements = [
   `CREATE TABLE IF NOT EXISTS staff (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, phone TEXT DEFAULT '', role TEXT NOT NULL DEFAULT 'sales', avatar TEXT DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE TABLE IF NOT EXISTS auth_accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, staff_id INTEGER NOT NULL UNIQUE REFERENCES staff(id) ON DELETE CASCADE, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, last_login_at TEXT DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE TABLE IF NOT EXISTS auth_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL UNIQUE, type TEXT NOT NULL DEFAULT 'individual', name TEXT NOT NULL, phone TEXT NOT NULL UNIQUE, email TEXT DEFAULT '', zalo TEXT DEFAULT '', facebook TEXT DEFAULT '', birthday TEXT DEFAULT '', gender TEXT DEFAULT '', address TEXT DEFAULT '', source TEXT NOT NULL DEFAULT 'Facebook', staff_id INTEGER REFERENCES staff(id), company TEXT DEFAULT '', tax_code TEXT DEFAULT '', segment TEXT NOT NULL DEFAULT 'Mới', tags TEXT NOT NULL DEFAULT '[]', notes TEXT DEFAULT '', first_order_at TEXT DEFAULT '', last_order_at TEXT DEFAULT '', total_orders INTEGER NOT NULL DEFAULT 0, total_spent INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE TABLE IF NOT EXISTS customer_recipients (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE, name TEXT NOT NULL, phone TEXT DEFAULT '', address TEXT DEFAULT '', relationship TEXT DEFAULT '', birthday TEXT DEFAULT '', anniversary TEXT DEFAULT '', notes TEXT DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE TABLE IF NOT EXISTS customer_events (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE, recipient_id INTEGER REFERENCES customer_recipients(id) ON DELETE SET NULL, type TEXT NOT NULL, title TEXT NOT NULL, event_date TEXT NOT NULL, remind_days TEXT NOT NULL DEFAULT '[30,14,7,3,1]', notes TEXT DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT NOT NULL UNIQUE, name TEXT NOT NULL, category TEXT NOT NULL, price INTEGER NOT NULL, cost INTEGER NOT NULL DEFAULT 0, image TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'active', sold INTEGER NOT NULL DEFAULT 0, revenue INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL UNIQUE, customer_id INTEGER REFERENCES customers(id), customer_name TEXT NOT NULL, customer_phone TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'Facebook', staff_id INTEGER REFERENCES staff(id), recipient_name TEXT NOT NULL, recipient_phone TEXT DEFAULT '', delivery_address TEXT DEFAULT '', maps_url TEXT DEFAULT '', delivery_date TEXT NOT NULL, delivery_time TEXT NOT NULL, delivery_type TEXT NOT NULL DEFAULT 'delivery', card_message TEXT DEFAULT '', notes TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'Mới', payment_status TEXT NOT NULL DEFAULT 'Chưa thanh toán', subtotal INTEGER NOT NULL DEFAULT 0, discount INTEGER NOT NULL DEFAULT 0, shipping_fee INTEGER NOT NULL DEFAULT 0, surcharge INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0, paid INTEGER NOT NULL DEFAULT 0, due_date TEXT DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE TABLE IF NOT EXISTS order_items (id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE, product_id INTEGER REFERENCES products(id), name TEXT NOT NULL, sku TEXT DEFAULT '', quantity INTEGER NOT NULL DEFAULT 1, unit_price INTEGER NOT NULL, discount INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL, is_custom INTEGER NOT NULL DEFAULT 0, custom_details TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
@@ -18,6 +23,9 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id)`,
   `CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone)`,
   `CREATE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_customer_recipients_customer_id ON customer_recipients(customer_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_customer_events_customer_date ON customer_events(customer_id, event_date)`,
+  `CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at)`,
 ];
 
 const names = ["Nguyễn Minh Anh","Trần Hoàng Nam","Lê Thu Hà","Phạm Gia Hân","Đỗ Nhật Minh","Vũ Thanh Tú","Bùi Bảo Ngọc","Hoàng Đức Anh","Nguyễn Quỳnh Chi","Lâm Ngọc Mai","Công ty An Nhiên","Studio Nắng","Trương Quốc Bảo","Lý Phương Linh","Hồ Hải Yến","Đặng Khánh Vy","Mai Tuấn Kiệt","Phan Thảo My","Công ty Mây Việt","Ngô Minh Khang"];
@@ -27,16 +35,28 @@ const productSeed = [
 const statuses = ["Mới","Đã xác nhận","Đã cọc","Đang chuẩn bị","Đã hoàn thiện","Chờ giao","Đang giao","Đã giao","Hoàn thành"];
 const sources = ["Facebook","Instagram","Zalo","Website","TikTok","Khách tại cửa hàng"];
 
+async function ensureDefaultAccount(){
+  const exists=await env.DB.prepare("SELECT id FROM auth_accounts LIMIT 1").first();
+  if(exists)return;
+  const manager=await env.DB.prepare("SELECT id,email FROM staff WHERE role='manager' AND active=1 ORDER BY id LIMIT 1").first<{id:number;email:string}>();
+  if(!manager)return;
+  const initialPassword=env.INITIAL_ADMIN_PASSWORD?.trim();
+  if(!initialPassword)throw new Error("Chưa cấu hình mật khẩu quản trị ban đầu");
+  const credentials=await hashPassword(initialPassword);
+  await env.DB.prepare("INSERT INTO auth_accounts (staff_id,email,password_hash,password_salt) VALUES (?,?,?,?)").bind(manager.id,manager.email.toLowerCase(),credentials.hash,credentials.salt).run();
+}
+
 export async function ensureDatabase() {
   const db = env.DB;
   if (!db) throw new Error("D1 binding DB is unavailable");
   await db.batch(schemaStatements.map((statement) => db.prepare(statement)));
   const count = await db.prepare("SELECT COUNT(*) AS count FROM customers").first<{ count: number }>();
-  if ((count?.count ?? 0) > 0) return;
+  if ((count?.count ?? 0) > 0) { await ensureDefaultAccount(); await db.prepare("PRAGMA optimize").run(); return; }
 
   await db.batch([
     ["Ngọc Lan","lan@flore.vn","0909000101","manager"],["Nero Nguyễn","nero@flore.vn","0909000102","sales"],["Mai Hoa","hoa@flore.vn","0909000103","florist"],["Đức Long","long@flore.vn","0909000104","delivery"],["Thảo Vy","vy@flore.vn","0909000105","accountant"],
   ].map((s) => db.prepare("INSERT INTO staff (name,email,phone,role) VALUES (?,?,?,?)").bind(...s)));
+  await ensureDefaultAccount();
 
   await db.batch(names.map((name, index) => db.prepare("INSERT INTO customers (code,type,name,phone,email,address,source,staff_id,company,segment,tags,first_order_at,last_order_at,total_orders,total_spent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(
     `CUS-${String(index + 1).padStart(4,"0")}`,
@@ -96,6 +116,8 @@ export async function ensureDatabase() {
   await db.batch([
     db.prepare("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)").bind("shop", JSON.stringify({ name:"Floré Flower Studio", address:"128 Nguyễn Huệ, Quận 1, TP.HCM", hotline:"0909 123 456", website:"flore.vn", facebook:"facebook.com/floreflower", bank:"Vietcombank · 0123456789 · NGUYEN NGOC LAN", footer:"Cảm ơn quý khách đã tin tưởng Floré!" })),
     db.prepare("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)").bind("invoice", JSON.stringify({ showPhone:true, showAddress:true, showDiscount:true, showShipping:true, showQr:true })),
+    db.prepare("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)").bind("workflow", JSON.stringify({ productGroups:["Hoa bó","Hoa giỏ","Hoa hộp","Hoa bình","Giỏ quả","Giỏ quả & hoa","Hoa sự kiện","Theo yêu cầu"], defaultShippingFee:50000, defaultFloristId:3, defaultShipperId:4 })),
+    db.prepare("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)").bind("notifications", JSON.stringify({ dueSoon:true, unpaid:true, specialOccasion:true })),
   ]);
   await db.prepare("PRAGMA optimize").run();
 }

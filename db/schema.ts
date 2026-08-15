@@ -1,5 +1,5 @@
 import { relations, sql } from "drizzle-orm";
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 const timestamps = {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -16,6 +16,24 @@ export const staff = sqliteTable("staff", {
   active: integer("active", { mode: "boolean" }).notNull().default(true),
   ...timestamps,
 });
+
+export const authAccounts = sqliteTable("auth_accounts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  staffId: integer("staff_id").notNull().unique().references(() => staff.id, { onDelete: "cascade" }),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  passwordSalt: text("password_salt").notNull(),
+  lastLoginAt: text("last_login_at").default(""),
+  ...timestamps,
+});
+
+export const authSessions = sqliteTable("auth_sessions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  staffId: integer("staff_id").notNull().references(() => staff.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash").notNull().unique(),
+  expiresAt: text("expires_at").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [index("idx_auth_sessions_expiry").on(table.expiresAt)]);
 
 export const customers = sqliteTable("customers", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -54,7 +72,7 @@ export const customerRecipients = sqliteTable("customer_recipients", {
   anniversary: text("anniversary").default(""),
   notes: text("notes").default(""),
   ...timestamps,
-});
+}, (table) => [index("idx_customer_recipients_customer_id").on(table.customerId)]);
 
 export const customerEvents = sqliteTable("customer_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -66,7 +84,7 @@ export const customerEvents = sqliteTable("customer_events", {
   remindDays: text("remind_days").notNull().default("[30,14,7,3,1]"),
   notes: text("notes").default(""),
   ...timestamps,
-});
+}, (table) => [index("idx_customer_events_customer_date").on(table.customerId, table.eventDate)]);
 
 export const productCategories = sqliteTable("product_categories", {
   id: integer("id").primaryKey({ autoIncrement: true }),

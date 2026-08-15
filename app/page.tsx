@@ -1,7 +1,7 @@
-import FlowerCRM from "./components/FlowerCRM";
+import AuthGate from "./components/AuthGate";
 
 export const dynamic = "force-dynamic";
 
 export default function Home() {
-  return <FlowerCRM />;
+  return <AuthGate />;
 }
