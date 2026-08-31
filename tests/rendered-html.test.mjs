@@ -54,6 +54,8 @@ test("ships the Firebase-backed application configuration", async () => {
   assert.match(firebaseClient, /kyEi7WdhTdZ7HfpI9PxxxVLbqNR2/);
   assert.match(firebaseStore, /flore_stores/);
   assert.match(firebaseStore, /loadFirebaseStore/);
+  assert.match(firebaseStore, /expenses/);
+  assert.match(firebaseStore, /createExpense/);
   assert.match(rules, /request\.auth\.uid/);
   assert.match(rules, /flore_stores\/default/);
   assert.match(firebaseConfig, /firestore\.rules/);
