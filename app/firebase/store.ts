@@ -37,7 +37,7 @@ async function seedFirestore(){
     for(const item of seed[name])batch.set(entityDoc(name,item.id),item as DocumentData);
   }
   batch.set(metaDoc("settings"),seed.settings as DocumentData);
-  batch.set(metaDoc("bootstrap"),{version:1,createdAt:now(),source:"flore-seed"});
+  batch.set(metaDoc("bootstrap"),{version:1,createdAt:now(),source:"flore-empty-bootstrap"});
   await batch.commit();
 }
 
@@ -111,9 +111,9 @@ export async function applyFirebaseAction(data:StoreData,body:Record<string,unkn
     }else if(action==="deleteProduct"){
       const id=Number(body.id);if(data.orders.some(item=>item.itemProductId===id))throw new Error("Sản phẩm đã phát sinh đơn; hãy chuyển sang Ẩn");remove("products",id);
     }else if(action==="createStaff"){
-      const name=clean(body.name,120),email=clean(body.email,160);if(!name||!email)throw new Error("Tên và email nhân viên là bắt buộc");if(data.staff.some(item=>item.email.toLowerCase()===email.toLowerCase()))throw new Error("Email nhân viên đã tồn tại");const id=nextId(data.staff),staff:Staff={id,name,email,phone:clean(body.phone,20),role:clean(body.role,30)||"sales",avatar:"",active:bool(body.active),createdAt:now()};put("staff",id,staff);
+      const name=clean(body.name,120),email=clean(body.email,160);if(!name)throw new Error("Tên nhân viên là bắt buộc");if(email&&data.staff.some(item=>item.email&&item.email.toLowerCase()===email.toLowerCase()))throw new Error("Email nhân viên đã tồn tại");const id=nextId(data.staff),staff:Staff={id,name,email,phone:clean(body.phone,20),role:clean(body.role,30)||"sales",avatar:"",active:bool(body.active),createdAt:now()};put("staff",id,staff);
     }else if(action==="updateStaff"){
-      const id=Number(body.id),old=getById(data.staff,id,"nhân viên"),name=clean(body.name,120),email=clean(body.email,160);if(!name||!email)throw new Error("Thông tin nhân viên không hợp lệ");put("staff",id,{...old,name,email,phone:clean(body.phone,20),role:clean(body.role,30)||"sales",active:bool(body.active)});
+      const id=Number(body.id),old=getById(data.staff,id,"nhân viên"),name=clean(body.name,120),email=clean(body.email,160);if(!name)throw new Error("Tên nhân viên là bắt buộc");if(email&&data.staff.some(item=>item.id!==id&&item.email&&item.email.toLowerCase()===email.toLowerCase()))throw new Error("Email nhân viên đã tồn tại");put("staff",id,{...old,name,email,phone:clean(body.phone,20),role:clean(body.role,30)||"sales",active:bool(body.active)});
     }else if(action==="createOrder"){
       const deliveryType=clean(body.deliveryType,20)||"delivery",isPickup=deliveryType==="pickup",customerName=clean(body.customerName,120),customerPhone=clean(body.customerPhone,20),recipientName=isPickup?customerName:clean(body.recipientName,120),productId=Number(body.productId)||0,quantity=Math.max(1,Number(body.quantity)||1),product=productId?data.products.find(item=>item.id===productId):undefined,itemName=product?.name||clean(body.itemName,160),unitPrice=product?.price??money(body.unitPrice);
       if(!customerName||!customerPhone||!recipientName||!itemName||unitPrice<=0)throw new Error("Vui lòng hoàn tất khách, người nhận, tên sản phẩm và đơn giá");
@@ -165,3 +165,4 @@ export async function applyFirebaseAction(data:StoreData,body:Record<string,unkn
 }
 
 export async function clearFirebaseDocument(name:EntityName,id:number){await deleteDoc(entityDoc(name,id))}
+
