@@ -6,7 +6,7 @@ export type Order = { id:number;code:string;customerId:number;customerName:strin
 export type Payment = { id:number;orderId:number;orderCode:string;customerName:string;amount:number;method:string;reference:string;notes:string;paidAt:string;staffName:string };
 export type Expense = { id:number;date:string;category:string;amount:number;vendor:string;paymentMethod:string;notes:string;createdAt:string;staffName:string };
 export type Invoice = { id:number;number:string;orderId:number;orderCode:string;customerName:string;total:number;status:string;issuedAt:string;customerPhone:string;customerAddress:string;subtotal:number;discount:number;shippingFee:number;surcharge:number;paid:number;remaining:number;paymentStatus:string;itemName:string;quantity:number;unitPrice:number };
-export type Staff = { id:number;name:string;email:string;phone:string;role:string;avatar:string;active:boolean;createdAt:string };
+export type Staff = { id:number;name:string;email:string;phone:string;role:string;avatar:string;active:boolean;createdAt:string;authUid?:string };
 export type ProductionTask = { id:number;orderId:number;orderCode:string;customerName:string;deliveryDate:string;deliveryTime:string;cardMessage:string;status:string;dueAt:string;tone:string;flowerTypes:string;instructions:string;referenceImage:string;completedImage:string;floristId:number;floristName:string;itemName:string };
 export type DeliveryTask = { id:number;orderId:number;orderCode:string;recipientName:string;recipientPhone:string;deliveryAddress:string;mapsUrl:string;deliveryDate:string;deliveryTime:string;status:string;cod:number;fee:number;notes:string;shipperId:number;shipperName:string };
 export type ActivityLog = { id:number;orderId:number;action:string;details:string;createdAt:string;staffName:string };
@@ -17,3 +17,4 @@ export type NotificationSettings = { dueSoon:boolean;unpaid:boolean;specialOccas
 export type StoreData = { customers:Customer[];recipients:CustomerRecipient[];events:CustomerEvent[];products:Product[];orders:Order[];payments:Payment[];expenses:Expense[];invoices:Invoice[];staff:Staff[];production:ProductionTask[];deliveries:DeliveryTask[];logs:ActivityLog[];settings:{shop:ShopSettings;invoice:InvoiceSettings;workflow:WorkflowSettings;notifications:NotificationSettings} };
 export type ViewKey = "dashboard"|"orders"|"production"|"delivery"|"customers"|"occasions"|"products"|"invoices"|"payments"|"expenses"|"reports"|"staff"|"settings";
 export type AuthUser = { id:string|number;name:string;email:string;role:string;avatar:string };
+

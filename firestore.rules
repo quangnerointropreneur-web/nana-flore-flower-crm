@@ -7,8 +7,101 @@ service cloud.firestore {
         && request.auth.uid == 'kyEi7WdhTdZ7HfpI9PxxxVLbqNR2';
     }
 
-    match /flore_stores/default/{document=**} {
-      allow read, write: if isFloreManager();
+    function staffAuthPath() {
+      return /databases/$(database)/documents/flore_stores/default/staffAuth/$(request.auth.uid);
+    }
+
+    function hasStaffAccount() {
+      return request.auth != null
+        && exists(staffAuthPath())
+        && get(staffAuthPath()).data.active == true;
+    }
+
+    function staffRole() {
+      return get(staffAuthPath()).data.role;
+    }
+
+    function hasRole(roles) {
+      return hasStaffAccount() && staffRole() in roles;
+    }
+
+    function canReadStore() {
+      return isFloreManager() || hasStaffAccount();
+    }
+
+    function canManageStore() {
+      return isFloreManager() || hasRole(['manager']);
+    }
+
+    match /flore_stores/default/staffAuth/{uid} {
+      allow read: if isFloreManager()
+        || (request.auth != null && request.auth.uid == uid && resource.data.active == true);
+      allow write: if isFloreManager();
+    }
+
+    match /flore_stores/default/meta/{docId} {
+      allow read: if canReadStore();
+      allow write: if canManageStore();
+    }
+
+    match /flore_stores/default/staff/{docId} {
+      allow read: if canReadStore();
+      allow write: if canManageStore();
+    }
+
+    match /flore_stores/default/customers/{docId} {
+      allow read: if canReadStore();
+      allow write: if canManageStore() || hasRole(['sales']);
+    }
+
+    match /flore_stores/default/recipients/{docId} {
+      allow read: if canReadStore();
+      allow write: if canManageStore() || hasRole(['sales']);
+    }
+
+    match /flore_stores/default/events/{docId} {
+      allow read: if canReadStore();
+      allow write: if canManageStore() || hasRole(['sales']);
+    }
+
+    match /flore_stores/default/products/{docId} {
+      allow read: if canReadStore();
+      allow write: if canManageStore() || hasRole(['sales']);
+    }
+
+    match /flore_stores/default/orders/{docId} {
+      allow read: if canReadStore();
+      allow write: if canManageStore() || hasRole(['sales', 'florist', 'delivery', 'accountant']);
+    }
+
+    match /flore_stores/default/production/{docId} {
+      allow read: if canReadStore();
+      allow write: if canManageStore() || hasRole(['florist', 'delivery']);
+    }
+
+    match /flore_stores/default/deliveries/{docId} {
+      allow read: if canReadStore();
+      allow write: if canManageStore() || hasRole(['delivery', 'sales', 'accountant']);
+    }
+
+    match /flore_stores/default/payments/{docId} {
+      allow read: if canReadStore();
+      allow write: if canManageStore() || hasRole(['sales', 'accountant']);
+    }
+
+    match /flore_stores/default/expenses/{docId} {
+      allow read: if canReadStore();
+      allow write: if canManageStore() || hasRole(['accountant']);
+    }
+
+    match /flore_stores/default/invoices/{docId} {
+      allow read: if canReadStore();
+      allow write: if canManageStore() || hasRole(['sales', 'accountant']);
+    }
+
+    match /flore_stores/default/logs/{docId} {
+      allow read: if canReadStore();
+      allow write: if canReadStore();
     }
 
     match /{document=**} {

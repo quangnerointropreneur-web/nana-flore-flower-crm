@@ -1,6 +1,6 @@
 import { collection, deleteDoc, doc, DocumentData, getDoc, getDocs, writeBatch } from "firebase/firestore";
 import type { Customer, CustomerEvent, CustomerRecipient, DeliveryTask, Expense, Invoice, Order, Payment, Product, ProductionTask, Staff, StoreData } from "../types";
-import { firestore } from "./client";
+import { createStaffAuthAccount, firestore } from "./client";
 import { buildSeedStore } from "./seed";
 
 const root = ["flore_stores","default"] as const;
@@ -10,6 +10,7 @@ type EntityName = typeof entityNames[number];
 const entityCollection=(name:EntityName)=>collection(firestore,...root,name);
 const entityDoc=(name:EntityName,id:number)=>doc(firestore,...root,name,String(id));
 const metaDoc=(name:string)=>doc(firestore,...root,"meta",name);
+const staffAuthDoc=(uid:string)=>doc(firestore,...root,"staffAuth",uid);
 const clean=(value:unknown,max=500)=>String(value??"").trim().slice(0,max);
 const money=(value:unknown)=>Math.max(0,Math.round(Number(value)||0));
 const nextId=(items:{id:number}[])=>items.reduce((max,item)=>Math.max(max,item.id),0)+1;
@@ -111,9 +112,9 @@ export async function applyFirebaseAction(data:StoreData,body:Record<string,unkn
     }else if(action==="deleteProduct"){
       const id=Number(body.id);if(data.orders.some(item=>item.itemProductId===id))throw new Error("Sản phẩm đã phát sinh đơn; hãy chuyển sang Ẩn");remove("products",id);
     }else if(action==="createStaff"){
-      const name=clean(body.name,120),email=clean(body.email,160);if(!name)throw new Error("Tên nhân viên là bắt buộc");if(email&&data.staff.some(item=>item.email&&item.email.toLowerCase()===email.toLowerCase()))throw new Error("Email nhân viên đã tồn tại");const id=nextId(data.staff),staff:Staff={id,name,email,phone:clean(body.phone,20),role:clean(body.role,30)||"sales",avatar:"",active:bool(body.active),createdAt:now()};put("staff",id,staff);
+const name=clean(body.name,120),email=clean(body.email,160),password=clean(body.password,120),role=clean(body.role,30)||"sales",shouldCreateLogin=body.createLogin===true||clean(body.createLogin,10)==="on";if(!name)throw new Error("Tên nhân viên là bắt buộc");if(email&&data.staff.some(item=>item.email&&item.email.toLowerCase()===email.toLowerCase()))throw new Error("Email nhân viên đã tồn tại");if(shouldCreateLogin&&(!email||password.length<6))throw new Error("Muốn tạo tài khoản đăng nhập cần email và mật khẩu tối thiểu 6 ký tự");const id=nextId(data.staff),authUid=shouldCreateLogin?await createStaffAuthAccount(email,password,name):"",staff:Staff={id,name,email,phone:clean(body.phone,20),role,avatar:"",active:bool(body.active),createdAt:now(),...(authUid?{authUid}:{})};put("staff",id,staff);if(authUid)batch.set(staffAuthDoc(authUid),{uid:authUid,staffId:id,name,email,role,active:staff.active,createdAt:now()});
     }else if(action==="updateStaff"){
-      const id=Number(body.id),old=getById(data.staff,id,"nhân viên"),name=clean(body.name,120),email=clean(body.email,160);if(!name)throw new Error("Tên nhân viên là bắt buộc");if(email&&data.staff.some(item=>item.id!==id&&item.email&&item.email.toLowerCase()===email.toLowerCase()))throw new Error("Email nhân viên đã tồn tại");put("staff",id,{...old,name,email,phone:clean(body.phone,20),role:clean(body.role,30)||"sales",active:bool(body.active)});
+const id=Number(body.id),old=getById(data.staff,id,"nhân viên"),name=clean(body.name,120),email=clean(body.email,160),password=clean(body.password,120),role=clean(body.role,30)||"sales",active=bool(body.active),shouldCreateLogin=body.createLogin===true||clean(body.createLogin,10)==="on";if(!name)throw new Error("Tên nhân viên là bắt buộc");if(email&&data.staff.some(item=>item.id!==id&&item.email&&item.email.toLowerCase()===email.toLowerCase()))throw new Error("Email nhân viên đã tồn tại");if(old.authUid&&email!==old.email)throw new Error("Nhân viên đã có tài khoản đăng nhập; đổi email đăng nhập cần thực hiện trong Firebase Authentication");if(shouldCreateLogin&&old.authUid)throw new Error("Nhân viên này đã có tài khoản đăng nhập");if(shouldCreateLogin&&(!email||password.length<6))throw new Error("Muốn tạo tài khoản đăng nhập cần email và mật khẩu tối thiểu 6 ký tự");const authUid=shouldCreateLogin?await createStaffAuthAccount(email,password,name):old.authUid;put("staff",id,{...old,name,email,phone:clean(body.phone,20),role,active,...(authUid?{authUid}:{})});if(authUid)batch.set(staffAuthDoc(authUid),{uid:authUid,staffId:id,name,email,role,active,createdAt:old.createdAt});
     }else if(action==="createOrder"){
       const deliveryType=clean(body.deliveryType,20)||"delivery",isPickup=deliveryType==="pickup",customerName=clean(body.customerName,120),customerPhone=clean(body.customerPhone,20),recipientName=isPickup?customerName:clean(body.recipientName,120),productId=Number(body.productId)||0,quantity=Math.max(1,Number(body.quantity)||1),product=productId?data.products.find(item=>item.id===productId):undefined,itemName=product?.name||clean(body.itemName,160),unitPrice=product?.price??money(body.unitPrice);
       if(!customerName||!customerPhone||!recipientName||!itemName||unitPrice<=0)throw new Error("Vui lòng hoàn tất khách, người nhận, tên sản phẩm và đơn giá");
@@ -165,4 +166,6 @@ export async function applyFirebaseAction(data:StoreData,body:Record<string,unkn
 }
 
 export async function clearFirebaseDocument(name:EntityName,id:number){await deleteDoc(entityDoc(name,id))}
+
+
 

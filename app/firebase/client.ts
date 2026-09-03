@@ -1,6 +1,6 @@
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { getAnalytics, isSupported } from "firebase/analytics";
-import { getAuth } from "firebase/auth";
+import { createUserWithEmailAndPassword, getAuth, signOut, updateProfile } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -20,4 +20,15 @@ export const firestore = getFirestore(firebaseApp);
 
 export async function initializeFirebaseAnalytics() {
   if (typeof window !== "undefined" && await isSupported()) getAnalytics(firebaseApp);
+}
+
+const staffCreatorAppName = "flore-staff-account-creator";
+
+export async function createStaffAuthAccount(email: string, password: string, name: string) {
+  const app = getApps().find((item) => item.name === staffCreatorAppName) ?? initializeApp(firebaseConfig, staffCreatorAppName);
+  const auth = getAuth(app);
+  const credential = await createUserWithEmailAndPassword(auth, email, password);
+  if (name) await updateProfile(credential.user, { displayName: name });
+  await signOut(auth);
+  return credential.user.uid;
 }
