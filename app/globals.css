@@ -81,6 +81,11 @@ html, body, body *, button, input, select, textarea { font-family: var(--font-ui
 .toast-error { background: #8f3944; max-width: min(500px, calc(100vw - 26px)); line-height: 1.5; }
 .toast-error svg, .account-action-error svg { flex-shrink: 0; }
 .account-action-error { display: flex; align-items: flex-start; gap: 8px; padding: 12px; margin-bottom: 14px; border: 1px solid #efc4cb; border-radius: 8px; background: var(--rose-soft); color: #8f3944; font-size: 10px; line-height: 1.6; }
+.staff-advanced { margin-top: 14px; }
+.staff-advanced .field-help { margin-top: 8px; line-height: 1.6; }
+.staff-account-form .danger-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 35px; padding: 0 11px; border: 1px solid #efc4cb; border-radius: 8px; background: var(--rose-soft); color: #8f3944; font-size: 10px; font-weight: 600; }
+.staff-account-form .login-error .danger-button { margin-left: 8px; }
+.staff-account-form button:disabled { opacity: .55; cursor: not-allowed; }
 @media (max-width: 650px) {
   .item-price-grid { grid-template-columns: 1fr 1fr; }
   .item-price-grid > .field:last-child { grid-column: 1/-1; }

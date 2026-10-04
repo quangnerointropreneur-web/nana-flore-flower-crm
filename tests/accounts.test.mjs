@@ -12,7 +12,36 @@ const {handleStaffAccounts,OWNER_UID}=await loadTs('../worker/firebase-admin.ts'
 const {demoCleanupPlan}=await loadTs('../app/firebase/demo-cleanup.ts');
 const {buildSeedStore}=await loadTs('../app/firebase/seed.ts');
 const {requestStaffAccount}=await loadTs('../app/firebase/staff-account-api.ts');
+const {loginEmailForIdentifier,staffLoginDetails,canAccessStaffMembership}=await loadTs('../app/firebase/staff-login.ts');
 const request=(body={},token='verified-token')=>new Request('https://example.com/api/staff-accounts',{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify(body)});
+
+test('username logins are deterministic and legacy email/manager logins stay compatible',()=>{
+  assert.equal(loginEmailForIdentifier('  LAN01 '),'lan01@staff.nananerospace.invalid');
+  assert.equal(loginEmailForIdentifier(' Manager@Example.com '),'manager@example.com');
+  assert.throws(()=>loginEmailForIdentifier('l'),/3–32/);
+  assert.throws(()=>loginEmailForIdentifier('lưu sinh'),/3–32/);
+  const login=staffLoginDetails({username:'Lan01'},'florist');
+  assert.equal(login.email,'');assert.equal(login.username,'lan01');
+  assert.equal(staffLoginDetails({email:'admin@example.com'},'manager').loginEmail,'admin@example.com');
+  assert.throws(()=>staffLoginDetails({username:'lan01'},'manager'),/email đăng nhập/);
+  const previous={authUid:'employee',username:'lan01',email:'old@example.com'};
+  assert.equal(staffLoginDetails({email:'contact@example.com'},'sales',previous).loginEmail,login.loginEmail);
+  assert.throws(()=>staffLoginDetails({username:'lan02'},'sales',previous),/không thể thay đổi/);
+});
+
+test('staff access requires an active unarchived membership with a supported role',()=>{
+  assert.equal(canAccessStaffMembership({role:'florist',active:true}),true);
+  for(const row of [undefined,{role:'sales'},{role:'sales',active:false},{role:'sales',active:true,archivedAt:'2026-10-05'},{role:'superadmin',active:true}])assert.equal(canAccessStaffMembership(row),false);
+});
+
+test('old account delete endpoint cannot permanently delete login accounts',async()=>{
+  const oldFetch=globalThis.fetch;let count=0;
+  try{
+    globalThis.fetch=async()=>{count++;return Response.json({users:[{localId:OWNER_UID}]})};
+    const response=await handleStaffAccounts(request({action:'deleteStaff',id:1}),{});
+    assert.equal(response.status,409);assert.match((await response.json()).error,/thu hồi quyền/);assert.equal(count,1);
+  }finally{globalThis.fetch=oldFetch}
+});
 
 test('account client separates Firebase identity and preserves website cookies',async()=>{
   let count=0;

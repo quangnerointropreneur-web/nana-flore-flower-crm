@@ -29,7 +29,12 @@ export async function createStaffAuthAccount(email: string, password: string, na
   const app = getApps().find((item) => item.name === staffCreatorAppName) ?? initializeApp(firebaseConfig, staffCreatorAppName);
   const auth = getAuth(app);
   try {
-    const credential = await createUserWithEmailAndPassword(auth, email, password);
+    let credential;
+    try { credential = await createUserWithEmailAndPassword(auth, email, password); }
+    catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "auth/email-already-in-use") throw new Error("Tên đăng nhập hoặc email đã được cấp trước đây. Hãy chọn tên khác; tài khoản đã thu hồi không được tái sử dụng.");
+      throw error;
+    }
     try {
       if (name) await updateProfile(credential.user, { displayName: name });
       if (persist) await persist(credential.user.uid);

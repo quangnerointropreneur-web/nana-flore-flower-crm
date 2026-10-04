@@ -84,6 +84,7 @@ export async function handleStaffAccounts(request: Request, env: AdminEnv): Prom
     const body = await request.json() as Record<string, unknown>;
     const action = String(body.action ?? "");
     if (!["createStaff", "updateStaff", "deleteStaff"].includes(action)) throw new ApiError("Thao tác không hợp lệ.");
+    if (action === "deleteStaff") throw new ApiError("Xóa nhân viên hiện là thu hồi quyền tại cửa hàng. Hãy tải lại trang để dùng thao tác mới; tài khoản đăng nhập không bị xóa vĩnh viễn.", 409);
     const token = await serviceAccessToken(env);
     const id = action === "createStaff" ? Date.now() : Number(body.id);
     if (!Number.isSafeInteger(id) || id <= 0) throw new ApiError("Mã nhân viên không hợp lệ.");
@@ -91,33 +92,24 @@ export async function handleStaffAccounts(request: Request, env: AdminEnv): Prom
     const previous = await readDocument(path, token);
     if (action !== "createStaff" && !previous) throw new ApiError("Không tìm thấy nhân viên.", 404);
     const old = previous ? values(previous) : null;
+    if (old?.archivedAt) throw new ApiError("Nhân viên đã bị thu hồi. Hãy tải lại danh sách.", 409);
     const uid = old?.authUid as string | undefined;
     if (uid === OWNER_UID) throw new ApiError("Tài khoản quản lý chính được giữ lại để bảo đảm quyền truy cập.");
     if (uid === caller && (action === "deleteStaff" || body.role !== "manager" || body.active === false || body.active === "false")) throw new ApiError("Bạn không thể xóa, khóa hoặc hạ quyền tài khoản đang sử dụng.");
     const authPath = uid ? `flore_stores/default/staffAuth/${uid}` : "";
     const previousAuth = uid ? await readDocument(authPath, token) : null;
     const authApi = `https://identitytoolkit.googleapis.com/v1/projects/${FIREBASE_PROJECT}/accounts`;
-    if (action === "deleteStaff") {
-      if (uid) {
-        // Remove CRM access before deleting the login; a failed login deletion remains safely blocked.
-        if (previousAuth) await googleJson(`${documents}:commit`, token, { writes: [write(authPath, { ...values(previousAuth), active: false }, previousAuth)] });
-        try { await googleJson(`${authApi}:delete`, token, { localId: uid }); }
-        catch (error) { throw new ApiError(`Đã khóa quyền vào cửa hàng, nhưng chưa xóa được tài khoản đăng nhập. Hãy thử xóa lại. ${error instanceof Error ? error.message : ""}`, 502); }
-      }
-      const docName = (p: string) => `${documents.slice("https://firestore.googleapis.com/v1/".length)}/${p}`;
-      await googleJson(`${documents}:commit`, token, { writes: [{ delete: docName(path), currentDocument: { updateTime: previous!.updateTime } }, ...(uid ? [{ delete: docName(authPath) }] : [])] });
-      return respond({ ok: true });
-    }
     const name = String(body.name ?? "").trim().slice(0, 120);
     const email = String(body.email ?? "").trim().toLowerCase();
+    const loginEmail = old?.username ? String(old.loginEmail || "") : email;
     const password = String(body.password ?? "");
     const role = String(body.role ?? "sales");
     const active = body.active !== false && body.active !== "false";
     const createLogin = body.createLogin === true || body.createLogin === "on";
     if (!name || !["manager", "sales", "florist", "delivery", "accountant"].includes(role)) throw new ApiError("Tên hoặc vai trò nhân viên không hợp lệ.");
-    if ((uid || createLogin) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new ApiError("Cần nhập email đăng nhập hợp lệ.");
+    if ((uid || createLogin) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginEmail)) throw new ApiError("Cần nhập email đăng nhập hợp lệ.");
     if ((createLogin && !uid || password) && (password.length < 6 || password.length > 4096)) throw new ApiError("Mật khẩu phải có ít nhất 6 ký tự.");
-    const staff = { ...old, id, name, email, phone: String(body.phone ?? "").trim().slice(0, 20), role, active, avatar: old?.avatar ?? "", createdAt: old?.createdAt ?? new Date().toISOString().slice(0, 19).replace("T", " ") };
+    const staff = { ...old, id, name, email, loginEmail, phone: String(body.phone ?? "").trim().slice(0, 20), role, active, avatar: old?.avatar ?? "", createdAt: old?.createdAt ?? new Date().toISOString().slice(0, 19).replace("T", " ") };
     let createdUid: string | undefined;
     if (createLogin && !uid) {
       const created = await googleJson(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${API_KEY}`, token, { targetProjectId: FIREBASE_PROJECT, email, password, displayName: name, disabled: !active });
@@ -125,13 +117,13 @@ export async function handleStaffAccounts(request: Request, env: AdminEnv): Prom
       createdUid = String(created.localId);
     }
     const accountUid = uid || createdUid;
-    const membership = accountUid ? { uid: accountUid, staffId: id, name, email, role, active, createdAt: staff.createdAt } : null;
+    const membership = accountUid ? { uid: accountUid, staffId: id, name, email, loginEmail, username: old?.username || "", role, active, createdAt: staff.createdAt } : null;
     const writes = [write(path, { ...staff, ...(accountUid ? { authUid: accountUid } : {}) }, previous), ...(membership ? [write(`flore_stores/default/staffAuth/${accountUid}`, membership, previousAuth)] : [])];
     let committed: Record<string, any>;
     try { committed = await googleJson(`${documents}:commit`, token, { writes }); }
     catch (error) { if (createdUid) await googleJson(`${authApi}:delete`, token, { localId: createdUid }).catch(() => undefined); throw error; }
     if (uid) {
-      try { await googleJson(`${authApi}:update`, token, { localId: uid, displayName: name, email, disableUser: !active, ...(password ? { password, validSince: String(Math.floor(Date.now() / 1000)) } : {}) }); }
+      try { await googleJson(`${authApi}:update`, token, { localId: uid, displayName: name, email: loginEmail, disableUser: !active, ...(password ? { password, validSince: String(Math.floor(Date.now() / 1000)) } : {}) }); }
       catch (error) {
         // Restore the directory when Auth rejects the change (e.g. a duplicate email).
         const rollback = [write(path, old!, { ...previous!, updateTime: committed.writeResults[0].updateTime }), ...(previousAuth ? [write(authPath, values(previousAuth), { ...previousAuth, updateTime: committed.writeResults[1].updateTime })] : [{ delete: `${documents.slice("https://firestore.googleapis.com/v1/".length)}/${authPath}`, currentDocument: { updateTime: committed.writeResults[1].updateTime } }])];

@@ -4,6 +4,7 @@ import { createStaffAuthAccount, firebaseAuth, firestore, manageStaffAccount, MA
 import { buildSeedStore } from "./seed";
 import { getOrderItems, itemsSubtotal, itemsSummary, itemNetAmounts, parseOrderItems } from "../order-items";
 import { resetConfirmedSalesData } from "./sales-reset";
+import { staffLoginDetails } from "./staff-login";
 
 const root = ["flore_stores","default"] as const;
 const entityNames = ["customers","recipients","events","products","orders","payments","expenses","invoices","staff","production","deliveries","logs"] as const;
@@ -64,7 +65,7 @@ export async function loadFirebaseStore(allowSeed=true):Promise<StoreData>{
       payments:payments.sort((a,b)=>b.paidAt.localeCompare(a.paidAt)||b.id-a.id),
       expenses:expenses.sort((a,b)=>b.date.localeCompare(a.date)||b.createdAt.localeCompare(a.createdAt)||b.id-a.id),
       invoices:invoices.sort((a,b)=>b.issuedAt.localeCompare(a.issuedAt)||b.id-a.id),
-      staff:staff.sort((a,b)=>a.id-b.id),
+      staff:staff.filter(item=>!item.archivedAt).sort((a,b)=>a.id-b.id),
       production:production.sort((a,b)=>a.dueAt.localeCompare(b.dueAt)),
       deliveries:deliveries.sort((a,b)=>a.deliveryDate.localeCompare(b.deliveryDate)||a.deliveryTime.localeCompare(b.deliveryTime)),
       logs:logs.sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.id-a.id).slice(0,100),
@@ -82,12 +83,24 @@ export async function applyFirebaseAction(data:StoreData,body:Record<string,unkn
       if (!current || (current.uid !== MANAGER_UID && (!account?.exists() || account.data().role !== "manager" || account.data().active !== true))) throw new Error("Chỉ quản lý được quản trị nhân viên và tài khoản.");
       const old = action !== "createStaff" ? getById(data.staff, Number(body.id), "nhân viên") : null;
       if (old?.authUid === MANAGER_UID) throw new Error("Không thể xóa hoặc thay đổi tài khoản quản lý chính tại đây.");
-      if (old?.authUid && (action === "deleteStaff" || clean(body.email, 160) !== old.email || String(body.password ?? ""))) {
-        await manageStaffAccount(body);
+      if (action === "deleteStaff") {
+        const id=Number(body.id),ref=entityDoc("staff",id),archivedAt=now(),logId=Date.now();
+        await runTransaction(firestore,async transaction=>{
+          const snapshot=await transaction.get(ref);
+          if(!snapshot.exists())throw new Error("Không tìm thấy nhân viên");
+          const staff=snapshot.data() as Staff;
+          if(staff.authUid===MANAGER_UID||staff.authUid===current.uid)throw new Error("Không thể xóa tài khoản quản lý chính hoặc tài khoản đang sử dụng");
+          if(staff.archivedAt)return;
+          const membershipRef=staff.authUid?staffAuthDoc(staff.authUid):null;
+          const membership=membershipRef?await transaction.get(membershipRef):null;
+          transaction.set(ref,{...staff,active:false,archivedAt,archivedBy:current.uid});
+          if(membershipRef)transaction.set(membershipRef,{...(membership?.data()||{}),uid:staff.authUid,staffId:id,name:staff.name,email:staff.email,username:staff.username||"",role:staff.role,active:false,archivedAt,archivedBy:current.uid,createdAt:staff.createdAt});
+          transaction.set(entityDoc("logs",logId),{id:logId,orderId:0,action:"Thu hồi tài khoản nhân viên",details:`${staff.name} · ${staff.username||staff.email||"Chưa cấp đăng nhập"}`,staffName:actorName,createdAt:archivedAt});
+        });
         return loadFirebaseStore(false);
       }
-      if (action === "deleteStaff") {
-        await deleteDoc(entityDoc("staff", Number(body.id)));
+      if (old?.authUid && ((!old.username && clean(body.email ?? old.email, 160).toLowerCase() !== old.email.toLowerCase()) || String(body.password ?? ""))) {
+        await manageStaffAccount(body);
         return loadFirebaseStore(false);
       }
     }
@@ -140,39 +153,60 @@ export async function applyFirebaseAction(data:StoreData,body:Record<string,unkn
     }else if(action==="deleteProduct"){
       const id=Number(body.id);if(data.orders.some(order=>getOrderItems(order,data.products).some(item=>item.productId===id)))throw new Error("Sản phẩm đã phát sinh đơn; hãy chuyển sang Ẩn");remove("products",id);
     }else if(action==="createStaff"){
-      const name=clean(body.name,120),email=clean(body.email,160).toLowerCase(),password=String(body.password??""),role=clean(body.role,30)||"sales",shouldCreateLogin=body.createLogin===true||body.createLogin==="on";
+      const name=clean(body.name,120),password=String(body.password??""),role=clean(body.role,30)||"sales",shouldCreateLogin=body.createLogin===true||body.createLogin==="on";
       if(!name)throw new Error("Tên nhân viên là bắt buộc");
       if(!["manager","sales","florist","delivery","accountant"].includes(role))throw new Error("Vai trò không hợp lệ");
+      const login=shouldCreateLogin?staffLoginDetails(body,role):{email:clean(body.email,160).toLowerCase(),username:"",loginEmail:""},email=login.email;
       if(email&&data.staff.some(item=>item.email?.toLowerCase()===email))throw new Error("Email nhân viên đã tồn tại");
-      if(shouldCreateLogin&&(!email||password.length<6))throw new Error("Cần email và mật khẩu tối thiểu 6 ký tự");
-      const id=Date.now(),staff:Staff={id,name,email,phone:clean(body.phone,20),role,avatar:"",active:bool(body.active),createdAt:now()};
+      if(login.username&&data.staff.some(item=>item.username===login.username))throw new Error("Tên đăng nhập đã tồn tại. Hãy chọn tên khác.");
+      if(shouldCreateLogin&&(password.length<6||password.length>4096))throw new Error("Mật khẩu cần từ 6 đến 4096 ký tự");
+      const id=Date.now(),staff:Staff={id,name,...login,phone:clean(body.phone,20),role,avatar:"",active:bool(body.active),createdAt:now()};
       if(shouldCreateLogin){
-        await createStaffAuthAccount(email,password,name,async uid=>{
-          put("staff",id,{...staff,authUid:uid});
-          batch.set(staffAuthDoc(uid),{uid,staffId:id,name,email,role,active:staff.active,createdAt:staff.createdAt});
-          await batch.commit();
+        await createStaffAuthAccount(login.loginEmail,password,name,async uid=>{
+          await runTransaction(firestore,async transaction=>{
+            const ref=entityDoc("staff",id),snapshot=await transaction.get(ref);
+            if(snapshot.exists())throw new Error("Mã nhân viên đã được sử dụng. Hãy thử tạo lại.");
+            transaction.set(ref,{...staff,authUid:uid});
+            transaction.set(staffAuthDoc(uid),{uid,staffId:id,name,...login,role,active:staff.active,createdAt:staff.createdAt});
+          });
         });
         return loadFirebaseStore(false);
       }
       put("staff",id,staff);
     }else if(action==="updateStaff"){
-      const id=Number(body.id),old=getById(data.staff,id,"nhân viên"),name=clean(body.name,120),email=clean(body.email,160).toLowerCase(),password=String(body.password??""),role=clean(body.role,30)||"sales",active=bool(body.active),shouldCreateLogin=body.createLogin===true||body.createLogin==="on";
+      const id=Number(body.id),old=getById(data.staff,id,"nhân viên"),name=clean(body.name,120),password=String(body.password??""),role=clean(body.role,30)||"sales",active=bool(body.active),shouldCreateLogin=body.createLogin===true||body.createLogin==="on";
       if(!name)throw new Error("Tên nhân viên là bắt buộc");
       if(!["manager","sales","florist","delivery","accountant"].includes(role))throw new Error("Vai trò không hợp lệ");
+      const login=old.authUid||shouldCreateLogin?staffLoginDetails(body,role,old):{email:clean(body.email ?? old.email,160).toLowerCase(),username:"",loginEmail:""},email=login.email;
       if(email&&data.staff.some(item=>item.id!==id&&item.email?.toLowerCase()===email))throw new Error("Email nhân viên đã tồn tại");
+      if(login.username&&data.staff.some(item=>item.id!==id&&item.username===login.username))throw new Error("Tên đăng nhập đã tồn tại. Hãy chọn tên khác.");
       if(old.authUid===firebaseAuth.currentUser?.uid&&(!active||role!=="manager"))throw new Error("Không thể khóa hoặc hạ quyền tài khoản đang sử dụng");
-      const updated={...old,name,email,phone:clean(body.phone,20),role,active};
+      const updated={...old,name,...login,phone:clean(body.phone,20),role,active};
       if(shouldCreateLogin&&!old.authUid){
-        if(!email||password.length<6)throw new Error("Cần email và mật khẩu tối thiểu 6 ký tự");
-        await createStaffAuthAccount(email,password,name,async uid=>{
-          put("staff",id,{...updated,authUid:uid});
-          batch.set(staffAuthDoc(uid),{uid,staffId:id,name,email,role,active,createdAt:old.createdAt});
-          await batch.commit();
+        if(password.length<6||password.length>4096)throw new Error("Mật khẩu cần từ 6 đến 4096 ký tự");
+        await createStaffAuthAccount(login.loginEmail,password,name,async uid=>{
+          await runTransaction(firestore,async transaction=>{
+            const ref=entityDoc("staff",id),snapshot=await transaction.get(ref);
+            if(!snapshot.exists()||snapshot.data().archivedAt)throw new Error("Nhân viên đã bị thu hồi. Hãy tải lại danh sách.");
+            if(snapshot.data().authUid)throw new Error("Nhân viên đã được cấp tài khoản. Hãy tải lại danh sách.");
+            transaction.set(ref,{...snapshot.data(),...updated,authUid:uid});
+            transaction.set(staffAuthDoc(uid),{uid,staffId:id,name,...login,role,active,createdAt:old.createdAt});
+          });
         });
         return loadFirebaseStore(false);
       }
-      put("staff",id,updated);
-      if(old.authUid)batch.set(staffAuthDoc(old.authUid),{uid:old.authUid,staffId:id,name,email,role,active,createdAt:old.createdAt});
+      await runTransaction(firestore,async transaction=>{
+        const ref=entityDoc("staff",id),snapshot=await transaction.get(ref);
+        if(!snapshot.exists()||snapshot.data().archivedAt)throw new Error("Nhân viên đã bị thu hồi. Hãy tải lại danh sách.");
+        const fresh=snapshot.data() as Staff;
+        if(fresh.authUid!==old.authUid)throw new Error("Thông tin tài khoản đã thay đổi. Hãy tải lại danh sách.");
+        const membershipRef=fresh.authUid?staffAuthDoc(fresh.authUid):null;
+        const membership=membershipRef?await transaction.get(membershipRef):null;
+        if(membership?.data()?.archivedAt)throw new Error("Nhân viên đã bị thu hồi. Hãy tải lại danh sách.");
+        transaction.set(ref,{...fresh,...updated});
+        if(membershipRef)transaction.set(membershipRef,{...(membership?.data()||{}),uid:fresh.authUid,staffId:id,name,...login,role,active,createdAt:fresh.createdAt});
+      });
+      return loadFirebaseStore(false);
     }else if(action==="createProductGroup"){
       const name=clean(body.name,80);
       if(!name)throw new Error("Nhập tên nhóm sản phẩm");

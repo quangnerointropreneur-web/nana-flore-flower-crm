@@ -9,6 +9,7 @@ const compile=async path=>ts.transpileModule(await readFile(new URL(path,import.
 const helpersUri=uri(await compile('../app/order-items.ts'));
 const {parseOrderItems,getOrderItems,itemsSubtotal,itemNetAmounts,productStatistics}=await import(helpersUri);
 const seedUri=uri(await compile('../app/firebase/seed.ts'));
+const staffLoginUri=uri(await compile('../app/firebase/staff-login.ts'));
 const cleanupUri=uri(await compile('../app/firebase/demo-cleanup.ts'));
 const line=(name,group,quantity,unitPrice)=>({id:name,name,group,quantity,unitPrice,productId:null,sku:'CUSTOM',tone:'',flowerTypes:''});
 
@@ -47,12 +48,63 @@ export const deleteDoc=async ref=>db().delete(ref.path);
 export const writeBatch=()=>{const pending=[];return{set:(ref,value)=>pending.push(()=>db().set(ref.path,structuredClone(value))),delete:ref=>pending.push(()=>db().delete(ref.path)),commit:async()=>pending.forEach(write=>write())}};
 export const runTransaction=async(_db,callback)=>{const batch=writeBatch();const result=await callback({...batch,get:getDoc});await batch.commit();return result};
 `);
-const clientUri=uri(`export const firestore={};export const MANAGER_UID='kyEi7WdhTdZ7HfpI9PxxxVLbqNR2';export const firebaseAuth={currentUser:{uid:MANAGER_UID,email:'manager@example.com'}};export const createStaffAuthAccount=()=>{throw Error('Not expected')};export const manageStaffAccount=()=>{throw Error('Not expected')};`);
+const clientUri=uri(`export const firestore={};export const MANAGER_UID='kyEi7WdhTdZ7HfpI9PxxxVLbqNR2';export const firebaseAuth={currentUser:{uid:MANAGER_UID,email:'manager@example.com'}};export const createStaffAuthAccount=(...args)=>{if(!globalThis.__staffCreator)throw Error('Not expected');return globalThis.__staffCreator(...args)};export const manageStaffAccount=()=>{throw Error('Not expected')};`);
 let storeSource=await compile('../app/firebase/store.ts');
 const resetUri=uri((await compile('../app/firebase/sales-reset.ts')).replaceAll('"firebase/firestore"',JSON.stringify(firestoreUri)).replaceAll('"./client"',JSON.stringify(clientUri)));
 const {resetConfirmedSalesData,SALES_RESET_ID,SALES_COLLECTIONS}=await import(resetUri);
-for(const [name,value] of [['firebase/firestore',firestoreUri],['./client',clientUri],['./seed',seedUri],['./sales-reset',resetUri],['../order-items',helpersUri]])storeSource=storeSource.replaceAll(`"${name}"`,JSON.stringify(value));
+for(const [name,value] of [['firebase/firestore',firestoreUri],['./client',clientUri],['./seed',seedUri],['./sales-reset',resetUri],['./staff-login',staffLoginUri],['../order-items',helpersUri]])storeSource=storeSource.replaceAll(`"${name}"`,JSON.stringify(value));
 const {applyFirebaseAction,loadFirebaseStore}=await import(uri(storeSource));const {buildSeedStore}=await import(seedUri);
+
+test('staff usernames create real credentials; edits and revocation require no admin endpoint and preserve history',async()=>{
+  const root='flore_stores/default/',seed=buildSeedStore();
+  const client=await import(clientUri),owner=client.firebaseAuth.currentUser;
+  const accounts=new Map(),oldNow=Date.now;let tick=oldNow();Date.now=()=>++tick;
+  globalThis.__flowerOrderDocuments=new Map([[root+'meta/bootstrap',{version:1}],[root+'meta/settings',seed.settings]]);
+  globalThis.__staffCreator=async(email,password,name,persist)=>{
+    if(accounts.has(email))throw Error('Tên đăng nhập hoặc email đã được cấp trước đây');
+    const uid='issued-staff-'+accounts.size;accounts.set(email,{uid,password});await persist(uid);return uid;
+  };
+  try{
+    let data=await loadFirebaseStore(false);
+    data=await applyFirebaseAction(data,{action:'createStaff',name:'Lan',username:'LAN01',role:'florist',createLogin:true,password:'staff-password',active:true});
+    const staff=data.staff[0],ref=root+'staff/'+staff.id,authRef=root+'staffAuth/'+staff.authUid;
+    assert.equal(staff.username,'lan01');assert.equal(staff.email,'');
+    assert.equal(accounts.get('lan01@staff.nananerospace.invalid').uid,staff.authUid);
+    assert.doesNotMatch(JSON.stringify([...globalThis.__flowerOrderDocuments.values()]),/staff-password|password/);
+    data=await applyFirebaseAction(data,{action:'updateStaff',id:staff.id,name:'Lan mới',email:'contact@example.com',phone:'0900000000',role:'sales',active:true});
+    assert.equal(data.staff[0].loginEmail,'lan01@staff.nananerospace.invalid');assert.equal(data.staff[0].email,'contact@example.com');
+    assert.equal(globalThis.__flowerOrderDocuments.get(authRef).role,'sales');
+    await assert.rejects(applyFirebaseAction(data,{action:'updateStaff',id:staff.id,name:'Lan',username:'new-name',role:'sales',active:true}),/không thể thay đổi/);
+    data=await applyFirebaseAction(data,{action:'updateStaff',id:staff.id,name:'Lan mới',role:'sales',active:false});
+    assert.equal(globalThis.__flowerOrderDocuments.get(authRef).active,false);assert.equal(data.staff.length,1,'temporary locks remain editable');
+    data=await applyFirebaseAction(data,{action:'updateStaff',id:staff.id,name:'Lan mới',role:'sales',active:true});
+    data=await applyFirebaseAction(data,{action:'createStaff',name:'Quản lý phụ',email:'manager2@example.com',role:'manager',createLogin:true,password:'manager-password',active:true});
+    assert.ok(accounts.has('manager2@example.com'));assert.equal(data.staff.find(row=>row.role==='manager').username,'');
+    // These records represent historical work and must not be cascaded away.
+    const history=new Map(['orders','production','deliveries','payments'].map((name,index)=>[root+name+'/900',{id:900,staffName:'Lan mới',floristId:staff.id,orderId:900,deliveryDate:'2027-01-01',deliveryTime:'10:00',paidAt:'2027-01-01',createdAt:'2027-01-01',index}]));
+    for(const [path,row]of history)globalThis.__flowerOrderDocuments.set(path,row);
+    const stale=structuredClone(data);
+    data=await applyFirebaseAction(data,{action:'deleteStaff',id:staff.id,actorName:'Chủ cửa hàng'});
+    assert.equal(data.staff.some(row=>row.id===staff.id),false);
+    assert.equal(globalThis.__flowerOrderDocuments.get(ref).active,false);assert.ok(globalThis.__flowerOrderDocuments.get(ref).archivedAt);
+    assert.equal(globalThis.__flowerOrderDocuments.get(authRef).active,false);assert.ok(globalThis.__flowerOrderDocuments.get(authRef).archivedAt);
+    assert.ok(accounts.has('lan01@staff.nananerospace.invalid'),'Auth identity is not permanently deleted');
+    for(const [path,row]of history)assert.deepEqual(globalThis.__flowerOrderDocuments.get(path),row);
+    await assert.rejects(applyFirebaseAction(stale,{action:'updateStaff',id:staff.id,name:'Lan',role:'sales',active:true}),/đã bị thu hồi/);
+    await assert.rejects(applyFirebaseAction(data,{action:'createStaff',name:'Lan khác',username:'lan01',role:'sales',createLogin:true,password:'other-password'}),/đã được cấp/);
+    client.firebaseAuth.currentUser={uid:staff.authUid};
+    await assert.rejects(applyFirebaseAction(data,{action:'createStaff',name:'Unauthorized',username:'nv02',role:'sales'}),/Chỉ quản lý/);
+    client.firebaseAuth.currentUser=owner;
+    // Both owner and currently signed-in manager accounts are protected.
+    const manager=data.staff.find(row=>row.role==='manager');
+    client.firebaseAuth.currentUser={uid:manager.authUid};
+    await assert.rejects(applyFirebaseAction(data,{action:'deleteStaff',id:manager.id}),/đang sử dụng/);
+    client.firebaseAuth.currentUser=owner;
+    globalThis.__flowerOrderDocuments.set(root+'staff/42',{...staff,id:42,authUid:owner.uid,archivedAt:''});
+    const withOwner=await loadFirebaseStore(false);
+    await assert.rejects(applyFirebaseAction(withOwner,{action:'deleteStaff',id:42}),/quản lý chính/);
+  }finally{delete globalThis.__staffCreator;client.firebaseAuth.currentUser=owner;Date.now=oldNow}
+});
 
 test('confirmed reset clears old records despite demo markers and preserves records created later',async()=>{
   const root='flore_stores/default/';const data=buildSeedStore();
