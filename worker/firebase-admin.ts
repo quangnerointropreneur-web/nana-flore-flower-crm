@@ -58,7 +58,9 @@ function write(path: string, value: Record<string, unknown>, previous: FirebaseD
   return { update: { name: `${documents.slice("https://firestore.googleapis.com/v1/".length)}/${path}`, fields: fields(value) }, currentDocument: previous ? { updateTime: previous.updateTime } : { exists: false } };
 }
 async function requireManager(request: Request) {
-  const bearer = request.headers.get("Authorization")?.match(/^Bearer (.+)$/)?.[1];
+  // Keep Firebase identity separate from the hosting platform's Authorization.
+  // Accept the old header during rolling upgrades; never bypass verification.
+  const bearer = (request.headers.get("X-Flore-Auth") ?? request.headers.get("Authorization"))?.match(/^Bearer (.+)$/)?.[1];
   if (!bearer) throw new ApiError("Vui lòng đăng nhập trước.", 401);
   // Firebase verifies the token, not just the untrusted JWT payload.
   const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${API_KEY}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ idToken: bearer }) });

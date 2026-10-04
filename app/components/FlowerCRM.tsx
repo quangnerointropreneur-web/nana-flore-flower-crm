@@ -47,16 +47,19 @@ export default function FlowerCRM({user,onLogout}:{user:AuthUser;onLogout:()=>vo
   const [saving,setSaving]=useState(false);
   const [error,setError]=useState("");
   const [toast,setToast]=useState("");
+  const [toastError,setToastError]=useState(false);
+  const [actionError,setActionError]=useState("");
   const [modal,setModal]=useState<string|null>(null);
   const [selected,setSelected]=useState<Order|Customer|Product|Expense|Invoice|Staff|null>(null);
   const [query,setQuery]=useState("");
   const [mobileNav,setMobileNav]=useState(false);
   const toastTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
+  useEffect(()=>{setActionError("")},[modal,selected]);
 
   const load=async()=>{setLoading(true);setError("");try{setData(await loadFirebaseStore())}catch(err){setError(err instanceof Error?err.message:"Không thể tải dữ liệu")}finally{setLoading(false)}};
   useEffect(()=>{let active=true;loadFirebaseStore().then(payload=>{if(active)setData(payload)}).catch(err=>{if(active)setError(err instanceof Error?err.message:"Không thể tải dữ liệu")}).finally(()=>{if(active)setLoading(false)});return()=>{active=false}},[]);
-  const showToast=(message:string)=>{setToast(message);if(toastTimer.current)clearTimeout(toastTimer.current);toastTimer.current=setTimeout(()=>setToast(""),3000)};
-  const act=async(body:Record<string,unknown>,message:string)=>{setSaving(true);try{const payload=await applyFirebaseAction(data,{...body,actorName:user.name});setData(payload);setModal(null);setSelected(null);showToast(message);return true}catch(err){showToast(err instanceof Error?err.message:"Không thể lưu");return false}finally{setSaving(false)}};
+  const showToast=(message:string,isError=false)=>{setToast(message);setToastError(isError);if(toastTimer.current)clearTimeout(toastTimer.current);toastTimer.current=setTimeout(()=>setToast(""),isError?9000:3000)};
+  const act=async(body:Record<string,unknown>,message:string)=>{setSaving(true);setActionError("");try{const payload=await applyFirebaseAction(data,{...body,actorName:user.name});setData(payload);setModal(null);setSelected(null);showToast(message);return true}catch(err){const text=err instanceof Error?err.message:"Không thể lưu";setActionError(text);showToast(text,true);return false}finally{setSaving(false)}};
   const openInvoiceForOrder=async(order:Order)=>{const existing=data.invoices.find(i=>i.orderId===order.id);if(existing){setSelected(existing);setModal("invoice");return}setSaving(true);try{const payload=await applyFirebaseAction(data,{action:"createInvoice",orderId:order.id});setData(payload);const created=payload.invoices.find(i=>i.orderId===order.id);if(created){setSelected(created);setModal("invoice");showToast("Đã tạo hóa đơn")}}catch(err){showToast(err instanceof Error?err.message:"Không thể tạo hóa đơn")}finally{setSaving(false)}};
 
   const searchResults=useMemo(()=>{const q=query.trim().toLocaleLowerCase("vi");if(!q)return[];const orders=data.orders.filter(o=>[o.code,o.customerName,o.customerPhone,o.recipientName,o.deliveryAddress,o.itemName].some(v=>String(v).toLocaleLowerCase("vi").includes(q))).slice(0,5);const customers=data.customers.filter(c=>[c.name,c.phone,c.email,c.company].some(v=>String(v).toLocaleLowerCase("vi").includes(q))).slice(0,4);return[...orders.map(item=>({type:"order",item})),...customers.map(item=>({type:"customer",item}))];},[query,data]);
@@ -92,7 +95,8 @@ export default function FlowerCRM({user,onLogout}:{user:AuthUser;onLogout:()=>vo
         </>}
       </div>
     </main>
-    {modal&&<Modal title={modalTitle(modal)} wide={["createOrder","orderDetail","invoice","orderEdit"].includes(modal)} close={()=>{setModal(null);setSelected(null)}}>
+    {modal&&<Modal title={modalTitle(modal)} wide={["createOrder","orderDetail","invoice","orderEdit"].includes(modal)} close={()=>{setModal(null);setSelected(null);setActionError("")}}>
+      {modal==="staffForm"&&actionError&&<div className="account-action-error" role="alert"><AlertCircle size={17}/><span>{actionError}</span></div>}
       {modal==="createOrder"&&<OrderForm data={data} initialCustomer={selected as Customer|null} saving={saving} submit={(values)=>act({action:"createOrder",...values},"Đã tạo đơn mới")}/>}
       {modal==="createCustomer"&&<CustomerForm saving={saving} submit={(values)=>act({action:"createCustomer",...values},"Đã thêm khách hàng")}/>}
       {modal==="customerDetail"&&selected&&<CustomerDetail customer={selected as Customer} data={data} saving={saving} close={()=>setModal(null)} act={act} addOccasion={()=>setModal("createOccasion")}/>}
@@ -106,7 +110,7 @@ export default function FlowerCRM({user,onLogout}:{user:AuthUser;onLogout:()=>vo
       {modal==="staffForm"&&user.role==="manager"&&<StaffForm staff={selected as Staff|null} currentUid={String(user.id)} saving={saving} remove={()=>act({action:"deleteStaff",id:selected?.id},"Đã xóa nhân viên và tài khoản")} submit={(values)=>act({action:selected?"updateStaff":"createStaff",id:selected?.id,...values},selected?"Đã cập nhật nhân viên":"Đã thêm nhân viên")}/>}
       {modal==="notifications"&&<NotificationsPanel data={data} openOrder={(order)=>{setSelected(order);setModal("orderDetail")}} goOccasions={()=>{setModal(null);setView("occasions")}}/>}
     </Modal>}
-    {toast&&<div className="toast"><Check size={17}/>{toast}</div>}
+    {toast&&<div className={`toast${toastError?" toast-error":""}`} role={toastError?"alert":"status"}>{toastError?<AlertCircle size={17}/>:<Check size={17}/>}<span>{toast}</span></div>}
   </div>
 }
 

@@ -2,6 +2,7 @@ import { getApp, getApps, initializeApp } from "firebase/app";
 import { getAnalytics, isSupported } from "firebase/analytics";
 import { createUserWithEmailAndPassword, deleteUser, getAuth, signOut, updateProfile } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
+import { requestStaffAccount } from "./staff-account-api";
 
 const firebaseConfig = {
   apiKey: "AIzaSyB5ZtSMY78wPpLapxLV4hnacwn85AfS2GY",
@@ -41,8 +42,5 @@ export async function createStaffAuthAccount(email: string, password: string, na
 export async function manageStaffAccount(body: Record<string, unknown>) {
   const current = firebaseAuth.currentUser;
   if (!current) throw new Error("Vui lòng đăng nhập trước.");
-  const response = await fetch("/api/staff-accounts", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${await current.getIdToken()}` }, body: JSON.stringify(body) });
-  const result = await response.json() as { error?: string; ok?: boolean };
-  if (!response.ok) throw new Error(result.error || "Không thể lưu tài khoản.");
-  return result;
+  return requestStaffAccount(body, await current.getIdToken());
 }

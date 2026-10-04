@@ -11,7 +11,59 @@ async function loadTs(path) {
 const {handleStaffAccounts,OWNER_UID}=await loadTs('../worker/firebase-admin.ts');
 const {demoCleanupPlan}=await loadTs('../app/firebase/demo-cleanup.ts');
 const {buildSeedStore}=await loadTs('../app/firebase/seed.ts');
+const {requestStaffAccount}=await loadTs('../app/firebase/staff-account-api.ts');
 const request=(body={},token='verified-token')=>new Request('https://example.com/api/staff-accounts',{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify(body)});
+
+test('account client separates Firebase identity and preserves website cookies',async()=>{
+  let count=0;
+  const result=await requestStaffAccount({action:'updateStaff',id:1},'firebase-id-token',async(url,options)=>{
+    count++;
+    assert.equal(url,'/api/staff-accounts');assert.equal(options.method,'POST');
+    assert.equal(options.credentials,'same-origin');assert.equal(options.cache,'no-store');
+    assert.equal(options.headers['X-Flore-Auth'],'Bearer firebase-id-token');
+    assert.equal(options.headers.Authorization,undefined);assert.equal(options.headers.Accept,'application/json');
+    return Response.json({ok:true});
+  });
+  assert.equal(result.ok,true);assert.equal(count,1);
+});
+
+test('HTML access failures and sign-in redirects become readable website session errors',async()=>{
+  for(const response of [new Response('<html>Sign in</html>',{status:401,headers:{'Content-Type':'text/html'}}),new Response('<html>Forbidden</html>',{status:403,headers:{'Content-Type':'text/html'}})]){
+    await assert.rejects(requestStaffAccount({},'token',async()=>response),/Phiên truy cập website/);
+  }
+  const redirected=new Response('<html>Sign in</html>',{headers:{'Content-Type':'text/html'}});
+  Object.defineProperty(redirected,'redirected',{value:true});
+  await assert.rejects(requestStaffAccount({},'token',async()=>redirected),/đăng nhập lại/);
+});
+
+test('account client never treats HTML, malformed JSON or missing success flags as saved',async()=>{
+  for(const response of [new Response('<html>Gateway</html>',{status:502,headers:{'Content-Type':'text/html'}}),new Response('<html>Fallback</html>',{headers:{'Content-Type':'text/html'}}),new Response('<html>Incorrect JSON type</html>',{headers:{'Content-Type':'application/json'}}),Response.json({}),Response.json([])]){
+    let count=0;
+    await assert.rejects(requestStaffAccount({action:'deleteStaff',id:1},'token',async()=>{count++;return response}),error=>!error.message.includes('Unexpected token')&&/xác nhận/.test(error.message));
+    assert.equal(count,1,'unconfirmed mutations must not be automatically retried');
+  }
+});
+
+test('account client preserves setup/permission messages and does not retry lost responses',async()=>{
+  await assert.rejects(requestStaffAccount({},'token',async()=>Response.json({error:'Cần cấu hình khóa Service Account.'},{status:503})),/Service Account/);
+  await assert.rejects(requestStaffAccount({},'token',async()=>Response.json({error:'Chỉ quản lý được quản trị tài khoản.'},{status:403})),/Chỉ quản lý/);
+  let count=0;
+  await assert.rejects(requestStaffAccount({},'token',async()=>{count++;throw Error('Network error')}),/kiểm tra lại danh sách/);
+  assert.equal(count,1);
+});
+
+test('server verifies custom Firebase header and does not fall back to a different identity',async()=>{
+  const oldFetch=globalThis.fetch;const verified=[];
+  try{
+    globalThis.fetch=async(_url,options)=>{verified.push(JSON.parse(options.body).idToken);return Response.json({users:[{localId:OWNER_UID}]})};
+    const custom=request({action:'updateStaff',id:1},'legacy-token');custom.headers.set('X-Flore-Auth','Bearer firebase-custom-token');
+    assert.equal((await handleStaffAccounts(custom,{})).status,503);
+    assert.deepEqual(verified,['firebase-custom-token']);
+    custom.headers.set('X-Flore-Auth','invalid');
+    assert.equal((await handleStaffAccounts(custom,{})).status,401);
+    assert.equal(verified.length,1);
+  }finally{globalThis.fetch=oldFetch}
+});
 
 test('empty stores contain no demo business records',()=>{
   const store=buildSeedStore();
