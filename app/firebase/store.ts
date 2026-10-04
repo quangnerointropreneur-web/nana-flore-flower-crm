@@ -1,6 +1,7 @@
-import { collection, deleteDoc, doc, DocumentData, getDoc, getDocs, writeBatch } from "firebase/firestore";
+import { collection, deleteDoc, doc, DocumentData, getDoc, getDocs, runTransaction, writeBatch } from "firebase/firestore";
 import type { Customer, CustomerEvent, CustomerRecipient, DeliveryTask, Expense, Invoice, Order, Payment, Product, ProductionTask, Staff, StoreData } from "../types";
-import { createStaffAuthAccount, firestore } from "./client";
+import { createStaffAuthAccount, firebaseAuth, firestore, manageStaffAccount, MANAGER_UID } from "./client";
+import { demoCleanupPlan } from "./demo-cleanup";
 import { buildSeedStore } from "./seed";
 
 const root = ["flore_stores","default"] as const;
@@ -42,8 +43,51 @@ async function seedFirestore(){
   await batch.commit();
 }
 
+async function removeOldDemoData() {
+  const user = firebaseAuth.currentUser;
+  if (!user || user.uid !== MANAGER_UID) return;
+  const marker = metaDoc("demoCleanupV2");
+  if ((await getDoc(marker)).exists()) return;
+  const snapshots = await Promise.all(entityNames.map(name => getDocs(entityCollection(name))));
+  await runTransaction(firestore, async transaction => {
+    if ((await transaction.get(marker)).exists()) return;
+    const current = await Promise.all(snapshots.flatMap(snapshot => snapshot.docs).map(item => transaction.get(item.ref)));
+    const data = buildSeedStore();
+    for (const snapshot of current) if (snapshot.exists()) {
+      const name = snapshot.ref.parent.id as EntityName;
+      (data[name] as { id: number }[]).push(snapshot.data() as { id: number });
+    }
+    const settings = await transaction.get(metaDoc("settings"));
+    const plan = demoCleanupPlan(data);
+    // Demo staff were only directory records. Never delete a subsequently issued real login here.
+    for (const staff of data.staff) if (staff.authUid) plan.staff.delete(staff.id);
+    for (const name of entityNames) for (const id of plan[name]) transaction.delete(entityDoc(name, id));
+    const retainedOrders = data.orders.filter(order => !plan.orders.has(order.id) && order.status !== "Hủy");
+    for (const customer of data.customers) if (!plan.customers.has(customer.id) && customer.createdAt === "2026-08-15 08:00:00" && customer.email === `khach${customer.id}@example.com`) {
+      const orders=retainedOrders.filter(order=>order.customerId===customer.id);
+      transaction.set(entityDoc("customers",customer.id),{...customer,totalOrders:orders.length,totalSpent:orders.reduce((sum,order)=>sum+order.total,0),firstOrderAt:orders.map(order=>order.deliveryDate).sort()[0]||"",lastOrderAt:orders.map(order=>order.deliveryDate).sort().at(-1)||""});
+    }
+    for (const product of data.products) if (!plan.products.has(product.id) && product.createdAt === "2026-08-15 08:00:00") {
+      const orders=retainedOrders.filter(order=>order.itemProductId===product.id);
+      transaction.set(entityDoc("products",product.id),{...product,sold:orders.reduce((sum,order)=>sum+order.quantity,0),revenue:orders.reduce((sum,order)=>sum+order.subtotal-order.discount,0)});
+    }
+    if (settings.exists()) {
+      const previous = settings.data() as StoreData["settings"];
+      const shop = { ...previous.shop };
+      const sample = { address: "128 Nguyễn Huệ, Quận 1, TP.HCM", hotline: "0909 123 456", website: "flore.vn", facebook: "facebook.com/floreflower", bank: "Vietcombank · 0123456789 · NGUYEN NGOC LAN" };
+      for (const key of Object.keys(sample) as (keyof typeof sample)[]) if (shop[key] === sample[key]) shop[key] = "";
+      const workflow = { ...previous.workflow };
+      if (plan.staff.has(workflow.defaultFloristId)) workflow.defaultFloristId = 0;
+      if (plan.staff.has(workflow.defaultShipperId)) workflow.defaultShipperId = 0;
+      transaction.set(metaDoc("settings"), { ...previous, shop, workflow });
+    }
+    transaction.set(marker, { completedAt: now(), deletedCount: Object.values(plan).reduce((sum, ids) => sum + ids.size, 0) });
+  });
+}
+
 export async function loadFirebaseStore(allowSeed=true):Promise<StoreData>{
   try{
+    await removeOldDemoData();
     const bootstrap=await getDoc(metaDoc("bootstrap"));
     if(!bootstrap.exists()&&allowSeed){await seedFirestore();return loadFirebaseStore(false)}
     const [customers,recipients,events,products,orders,payments,expenses,invoices,staff,production,deliveries,logs,settingsSnapshot]=await Promise.all([
@@ -70,11 +114,26 @@ export async function loadFirebaseStore(allowSeed=true):Promise<StoreData>{
 
 export async function applyFirebaseAction(data:StoreData,body:Record<string,unknown>):Promise<StoreData>{
   try{
-    const action=clean(body.action,50),batch=writeBatch(firestore);
+    const action=clean(body.action,50),batch=writeBatch(firestore),actorName=clean(body.actorName,120)||firebaseAuth.currentUser?.displayName||firebaseAuth.currentUser?.email||"Quản lý cửa hàng";
+    if (["createStaff", "updateStaff", "deleteStaff"].includes(action)) {
+      const current = firebaseAuth.currentUser;
+      const account = current?.uid === MANAGER_UID ? null : current ? await getDoc(staffAuthDoc(current.uid)) : null;
+      if (!current || (current.uid !== MANAGER_UID && (!account?.exists() || account.data().role !== "manager" || account.data().active !== true))) throw new Error("Chỉ quản lý được quản trị nhân viên và tài khoản.");
+      const old = action !== "createStaff" ? getById(data.staff, Number(body.id), "nhân viên") : null;
+      if (old?.authUid === MANAGER_UID) throw new Error("Không thể xóa hoặc thay đổi tài khoản quản lý chính tại đây.");
+      if (old?.authUid && (action === "deleteStaff" || clean(body.email, 160) !== old.email || String(body.password ?? ""))) {
+        await manageStaffAccount(body);
+        return loadFirebaseStore(false);
+      }
+      if (action === "deleteStaff") {
+        await deleteDoc(entityDoc("staff", Number(body.id)));
+        return loadFirebaseStore(false);
+      }
+    }
     const put=(name:EntityName,id:number,value:unknown)=>batch.set(entityDoc(name,id),value as DocumentData);
     const remove=(name:EntityName,id:number)=>batch.delete(entityDoc(name,id));
     let nextLog=nextId(data.logs);
-    const addLog=(orderId:number,actionName:string,details:string,staffName="Ngọc Lan")=>{const value={id:nextLog++,orderId,action:actionName,details,createdAt:now(),staffName};put("logs",value.id,value)};
+    const addLog=(orderId:number,actionName:string,details:string,staffName=actorName)=>{const value={id:nextLog++,orderId,action:actionName,details,createdAt:now(),staffName};put("logs",value.id,value)};
     const upsertRecipient=(customerId:number,input:Record<string,unknown>)=>{
       const name=clean(input.recipientName,120),phone=clean(input.recipientPhone,20),address=clean(input.deliveryAddress,300),relationship=clean(input.relationship,60)||"Bản thân";
       if(!name)throw new Error("Tên người nhận là bắt buộc");
@@ -95,7 +154,7 @@ export async function applyFirebaseAction(data:StoreData,body:Record<string,unkn
 
     if(action==="createCustomer"){
       const name=clean(body.name,120),phone=clean(body.phone,20);if(!name||!phone)throw new Error("Tên và số điện thoại là bắt buộc");if(data.customers.some(item=>item.phone===phone))throw new Error("Số điện thoại đã tồn tại");
-      const id=nextId(data.customers),customer:Customer={id,code:`CUS-${String(id).padStart(4,"0")}`,type:clean(body.type)||"individual",name,phone,email:clean(body.email,120),address:clean(body.address,300),source:clean(body.source,50)||"Facebook",company:clean(body.company,160),taxCode:clean(body.taxCode,30),segment:"Mới",tags:JSON.stringify(body.tags??[]),notes:clean(body.notes),firstOrderAt:"",lastOrderAt:"",totalOrders:0,totalSpent:0,createdAt:now(),staffName:"Nero Nguyễn"};put("customers",id,customer);
+      const id=nextId(data.customers),customer:Customer={id,code:`CUS-${String(id).padStart(4,"0")}`,type:clean(body.type)||"individual",name,phone,email:clean(body.email,120),address:clean(body.address,300),source:clean(body.source,50)||"Facebook",company:clean(body.company,160),taxCode:clean(body.taxCode,30),segment:"Mới",tags:JSON.stringify(body.tags??[]),notes:clean(body.notes),firstOrderAt:"",lastOrderAt:"",totalOrders:0,totalSpent:0,createdAt:now(),staffName:actorName};put("customers",id,customer);
     }else if(action==="updateCustomer"){
       const id=Number(body.id),old=getById(data.customers,id,"khách hàng"),phone=clean(body.phone,20);if(data.customers.some(item=>item.id!==id&&item.phone===phone))throw new Error("Số điện thoại đã tồn tại");
       const customer={...old,name:clean(body.name,120),phone,email:clean(body.email,120),address:clean(body.address,300),source:clean(body.source,50),segment:clean(body.segment,30),company:clean(body.company,160),taxCode:clean(body.taxCode,30),notes:clean(body.notes)};put("customers",id,customer);
@@ -112,22 +171,52 @@ export async function applyFirebaseAction(data:StoreData,body:Record<string,unkn
     }else if(action==="deleteProduct"){
       const id=Number(body.id);if(data.orders.some(item=>item.itemProductId===id))throw new Error("Sản phẩm đã phát sinh đơn; hãy chuyển sang Ẩn");remove("products",id);
     }else if(action==="createStaff"){
-const name=clean(body.name,120),email=clean(body.email,160),password=clean(body.password,120),role=clean(body.role,30)||"sales",shouldCreateLogin=body.createLogin===true||clean(body.createLogin,10)==="on";if(!name)throw new Error("Tên nhân viên là bắt buộc");if(email&&data.staff.some(item=>item.email&&item.email.toLowerCase()===email.toLowerCase()))throw new Error("Email nhân viên đã tồn tại");if(shouldCreateLogin&&(!email||password.length<6))throw new Error("Muốn tạo tài khoản đăng nhập cần email và mật khẩu tối thiểu 6 ký tự");const id=nextId(data.staff),authUid=shouldCreateLogin?await createStaffAuthAccount(email,password,name):"",staff:Staff={id,name,email,phone:clean(body.phone,20),role,avatar:"",active:bool(body.active),createdAt:now(),...(authUid?{authUid}:{})};put("staff",id,staff);if(authUid)batch.set(staffAuthDoc(authUid),{uid:authUid,staffId:id,name,email,role,active:staff.active,createdAt:now()});
+      const name=clean(body.name,120),email=clean(body.email,160).toLowerCase(),password=String(body.password??""),role=clean(body.role,30)||"sales",shouldCreateLogin=body.createLogin===true||body.createLogin==="on";
+      if(!name)throw new Error("Tên nhân viên là bắt buộc");
+      if(!["manager","sales","florist","delivery","accountant"].includes(role))throw new Error("Vai trò không hợp lệ");
+      if(email&&data.staff.some(item=>item.email?.toLowerCase()===email))throw new Error("Email nhân viên đã tồn tại");
+      if(shouldCreateLogin&&(!email||password.length<6))throw new Error("Cần email và mật khẩu tối thiểu 6 ký tự");
+      const id=Date.now(),staff:Staff={id,name,email,phone:clean(body.phone,20),role,avatar:"",active:bool(body.active),createdAt:now()};
+      if(shouldCreateLogin){
+        await createStaffAuthAccount(email,password,name,async uid=>{
+          put("staff",id,{...staff,authUid:uid});
+          batch.set(staffAuthDoc(uid),{uid,staffId:id,name,email,role,active:staff.active,createdAt:staff.createdAt});
+          await batch.commit();
+        });
+        return loadFirebaseStore(false);
+      }
+      put("staff",id,staff);
     }else if(action==="updateStaff"){
-const id=Number(body.id),old=getById(data.staff,id,"nhân viên"),name=clean(body.name,120),email=clean(body.email,160),password=clean(body.password,120),role=clean(body.role,30)||"sales",active=bool(body.active),shouldCreateLogin=body.createLogin===true||clean(body.createLogin,10)==="on";if(!name)throw new Error("Tên nhân viên là bắt buộc");if(email&&data.staff.some(item=>item.id!==id&&item.email&&item.email.toLowerCase()===email.toLowerCase()))throw new Error("Email nhân viên đã tồn tại");if(old.authUid&&email!==old.email)throw new Error("Nhân viên đã có tài khoản đăng nhập; đổi email đăng nhập cần thực hiện trong Firebase Authentication");if(shouldCreateLogin&&old.authUid)throw new Error("Nhân viên này đã có tài khoản đăng nhập");if(shouldCreateLogin&&(!email||password.length<6))throw new Error("Muốn tạo tài khoản đăng nhập cần email và mật khẩu tối thiểu 6 ký tự");const authUid=shouldCreateLogin?await createStaffAuthAccount(email,password,name):old.authUid;put("staff",id,{...old,name,email,phone:clean(body.phone,20),role,active,...(authUid?{authUid}:{})});if(authUid)batch.set(staffAuthDoc(authUid),{uid:authUid,staffId:id,name,email,role,active,createdAt:old.createdAt});
+      const id=Number(body.id),old=getById(data.staff,id,"nhân viên"),name=clean(body.name,120),email=clean(body.email,160).toLowerCase(),password=String(body.password??""),role=clean(body.role,30)||"sales",active=bool(body.active),shouldCreateLogin=body.createLogin===true||body.createLogin==="on";
+      if(!name)throw new Error("Tên nhân viên là bắt buộc");
+      if(!["manager","sales","florist","delivery","accountant"].includes(role))throw new Error("Vai trò không hợp lệ");
+      if(email&&data.staff.some(item=>item.id!==id&&item.email?.toLowerCase()===email))throw new Error("Email nhân viên đã tồn tại");
+      if(old.authUid===firebaseAuth.currentUser?.uid&&(!active||role!=="manager"))throw new Error("Không thể khóa hoặc hạ quyền tài khoản đang sử dụng");
+      const updated={...old,name,email,phone:clean(body.phone,20),role,active};
+      if(shouldCreateLogin&&!old.authUid){
+        if(!email||password.length<6)throw new Error("Cần email và mật khẩu tối thiểu 6 ký tự");
+        await createStaffAuthAccount(email,password,name,async uid=>{
+          put("staff",id,{...updated,authUid:uid});
+          batch.set(staffAuthDoc(uid),{uid,staffId:id,name,email,role,active,createdAt:old.createdAt});
+          await batch.commit();
+        });
+        return loadFirebaseStore(false);
+      }
+      put("staff",id,updated);
+      if(old.authUid)batch.set(staffAuthDoc(old.authUid),{uid:old.authUid,staffId:id,name,email,role,active,createdAt:old.createdAt});
     }else if(action==="createOrder"){
       const deliveryType=clean(body.deliveryType,20)||"delivery",isPickup=deliveryType==="pickup",customerName=clean(body.customerName,120),customerPhone=clean(body.customerPhone,20),recipientName=isPickup?customerName:clean(body.recipientName,120),productId=Number(body.productId)||0,quantity=Math.max(1,Number(body.quantity)||1),product=productId?data.products.find(item=>item.id===productId):undefined,itemName=product?.name||clean(body.itemName,160),unitPrice=product?.price??money(body.unitPrice);
       if(!customerName||!customerPhone||!recipientName||!itemName||unitPrice<=0)throw new Error("Vui lòng hoàn tất khách, người nhận, tên sản phẩm và đơn giá");
-      let customer=data.customers.find(item=>item.phone===customerPhone);if(!customer){const id=nextId(data.customers);customer={id,code:`CUS-${String(id).padStart(4,"0")}`,type:"individual",name:customerName,phone:customerPhone,email:"",address:"",source:clean(body.source,50)||"Facebook",company:"",taxCode:"",segment:"Mới",tags:"[]",notes:"",firstOrderAt:"",lastOrderAt:"",totalOrders:0,totalSpent:0,createdAt:now(),staffName:"Nero Nguyễn"}}
+      let customer=data.customers.find(item=>item.phone===customerPhone);if(!customer){const id=nextId(data.customers);customer={id,code:`CUS-${String(id).padStart(4,"0")}`,type:"individual",name:customerName,phone:customerPhone,email:"",address:"",source:clean(body.source,50)||"Facebook",company:"",taxCode:"",segment:"Mới",tags:"[]",notes:"",firstOrderAt:"",lastOrderAt:"",totalOrders:0,totalSpent:0,createdAt:now(),staffName:actorName}}
       const shippingFee=isPickup?0:money(body.shippingFee),discount=money(body.discount),subtotal=unitPrice*quantity,total=Math.max(0,subtotal-discount+shippingFee),paid=Math.min(total,money(body.paid)),id=nextId(data.orders),stamp=new Date(),dateCode=`${String(stamp.getFullYear()).slice(-2)}${String(stamp.getMonth()+1).padStart(2,"0")}${String(stamp.getDate()).padStart(2,"0")}`;
-      const order:Order={id,code:`FH-${dateCode}-${String(id).padStart(3,"0")}`,customerId:customer.id,customerName,customerPhone,source:clean(body.source,50)||"Facebook",recipientName,recipientPhone:isPickup?customerPhone:clean(body.recipientPhone,20),deliveryAddress:isPickup?"Nhận tại cửa hàng":clean(body.deliveryAddress,300),mapsUrl:isPickup?"":clean(body.mapsUrl,300),deliveryDate:clean(body.deliveryDate,20),deliveryTime:clean(body.deliveryTime,10),deliveryType,cardMessage:clean(body.cardMessage,800),notes:clean(body.notes,500),status:"Mới",paymentStatus:paid===0?"Chưa thanh toán":paid<total?"Đã cọc":"Đã thanh toán đủ",subtotal,discount,shippingFee,surcharge:0,total,paid,remaining:total-paid,dueDate:paid<total?clean(body.dueDate,20):"",createdAt:now(),staffName:"Nero Nguyễn",itemProductId:product?.id??null,itemName,itemSku:product?.sku||"CUSTOM",quantity,unitPrice};put("orders",id,order);
+      const order:Order={id,code:`FH-${dateCode}-${String(id).padStart(3,"0")}`,customerId:customer.id,customerName,customerPhone,source:clean(body.source,50)||"Facebook",recipientName,recipientPhone:isPickup?customerPhone:clean(body.recipientPhone,20),deliveryAddress:isPickup?"Nhận tại cửa hàng":clean(body.deliveryAddress,300),mapsUrl:isPickup?"":clean(body.mapsUrl,300),deliveryDate:clean(body.deliveryDate,20),deliveryTime:clean(body.deliveryTime,10),deliveryType,cardMessage:clean(body.cardMessage,800),notes:clean(body.notes,500),status:"Mới",paymentStatus:paid===0?"Chưa thanh toán":paid<total?"Đã cọc":"Đã thanh toán đủ",subtotal,discount,shippingFee,surcharge:0,total,paid,remaining:total-paid,dueDate:paid<total?clean(body.dueDate,20):"",createdAt:now(),staffName:actorName,itemProductId:product?.id??null,itemName,itemSku:product?.sku||"CUSTOM",quantity,unitPrice};put("orders",id,order);
       const recipient=isPickup?{id:0,customerId:customer.id,name:recipientName,phone:customerPhone,address:"Nhận tại cửa hàng",relationship:"Bản thân",birthday:"",anniversary:"",notes:"",createdAt:now()}:upsertRecipient(customer.id,body),floristId=Number(body.floristId)||data.settings.workflow.defaultFloristId,shipperId=Number(body.shipperId)||data.settings.workflow.defaultShipperId,florist=data.staff.find(item=>item.id===floristId),shipper=data.staff.find(item=>item.id===shipperId);
       const production:ProductionTask={id,orderId:id,orderCode:order.code,customerName,deliveryDate:order.deliveryDate,deliveryTime:order.deliveryTime,cardMessage:order.cardMessage,status:"Chưa làm",dueAt:`${order.deliveryDate} ${order.deliveryTime}:00`,tone:clean(body.tone,60),flowerTypes:clean(body.flowerTypes,160),instructions:order.notes,referenceImage:"",completedImage:"",floristId,floristName:florist?.name||"Chưa phân công",itemName};put("production",id,production);
-      const delivery:DeliveryTask={id,orderId:id,orderCode:order.code,recipientName,recipientPhone:order.recipientPhone,deliveryAddress:order.deliveryAddress,mapsUrl:order.mapsUrl,deliveryDate:order.deliveryDate,deliveryTime:order.deliveryTime,status:"Chờ giao",cod:order.remaining,fee:shippingFee,notes:clean(body.deliveryNotes,300),shipperId,shipperName:shipper?.name||"Chưa phân công"};put("deliveries",id,delivery);addLog(id,"Tạo đơn",`${customerName} đặt ${itemName}`,"Nero Nguyễn");
+      const delivery:DeliveryTask={id,orderId:id,orderCode:order.code,recipientName,recipientPhone:order.recipientPhone,deliveryAddress:order.deliveryAddress,mapsUrl:order.mapsUrl,deliveryDate:order.deliveryDate,deliveryTime:order.deliveryTime,status:"Chờ giao",cod:order.remaining,fee:shippingFee,notes:clean(body.deliveryNotes,300),shipperId,shipperName:shipper?.name||"Chưa phân công"};put("deliveries",id,delivery);addLog(id,"Tạo đơn",`${customerName} đặt ${itemName}`,actorName);
       put("customers",customer.id,{...customer,name:customerName,lastOrderAt:order.deliveryDate,firstOrderAt:customer.firstOrderAt||order.deliveryDate,totalOrders:customer.totalOrders+1,totalSpent:customer.totalSpent+total,segment:customer.totalOrders>=4?"Thân thiết":customer.totalOrders>=1?"Quay lại":customer.segment});
       if(product)put("products",product.id,{...product,sold:product.sold+quantity,revenue:product.revenue+subtotal-discount});
-      if(paid>0){const paymentId=nextId(data.payments),payment:Payment={id:paymentId,orderId:id,orderCode:order.code,customerName,amount:paid,method:clean(body.paymentMethod,40)||"Chuyển khoản",reference:`PAY-${Date.now()}`,notes:"Thanh toán khi tạo đơn",paidAt:now(),staffName:"Nero Nguyễn"};put("payments",paymentId,payment)}
-      if(!isPickup&&(body.saveOccasion===true||clean(body.saveOccasion,10)==="on")&&clean(body.occasionType,60)&&clean(body.occasionDate,10)){saveOccasion(customer,recipient,body);addLog(id,"Lưu dịp đặc biệt",`${clean(body.occasionType,60)} của ${recipientName}`,"Nero Nguyễn")}
+      if(paid>0){const paymentId=nextId(data.payments),payment:Payment={id:paymentId,orderId:id,orderCode:order.code,customerName,amount:paid,method:clean(body.paymentMethod,40)||"Chuyển khoản",reference:`PAY-${Date.now()}`,notes:"Thanh toán khi tạo đơn",paidAt:now(),staffName:actorName};put("payments",paymentId,payment)}
+      if(!isPickup&&(body.saveOccasion===true||clean(body.saveOccasion,10)==="on")&&clean(body.occasionType,60)&&clean(body.occasionDate,10)){saveOccasion(customer,recipient,body);addLog(id,"Lưu dịp đặc biệt",`${clean(body.occasionType,60)} của ${recipientName}`,actorName)}
     }else if(action==="updateOrder"){
       const id=Number(body.id),old=getById(data.orders,id,"đơn hàng"),productId=Number(body.productId)||0,product=productId?data.products.find(item=>item.id===productId):undefined,itemName=clean(body.itemName,160),quantity=Math.max(1,Number(body.quantity)||1),unitPrice=money(body.unitPrice),deliveryType=clean(body.deliveryType,20)||old.deliveryType,isPickup=deliveryType==="pickup",shippingFee=isPickup?0:money(body.shippingFee),discount=money(body.discount),subtotal=unitPrice*quantity,total=Math.max(0,subtotal-discount+shippingFee);if(!itemName||unitPrice<=0)throw new Error("Tên sản phẩm và đơn giá là bắt buộc");if(total<old.paid)throw new Error(`Tổng mới không thể thấp hơn số tiền đã thu (${old.paid.toLocaleString("vi-VN")}đ)`);
       const updatedCustomerName=clean(body.customerName,120),updatedCustomerPhone=clean(body.customerPhone,20);const updated:Order={...old,customerName:updatedCustomerName,customerPhone:updatedCustomerPhone,source:clean(body.source,50),recipientName:isPickup?updatedCustomerName:clean(body.recipientName,120),recipientPhone:isPickup?updatedCustomerPhone:clean(body.recipientPhone,20),deliveryAddress:isPickup?"Nhận tại cửa hàng":clean(body.deliveryAddress,300),mapsUrl:isPickup?"":clean(body.mapsUrl,300),deliveryDate:clean(body.deliveryDate,10),deliveryTime:clean(body.deliveryTime,10),deliveryType,cardMessage:clean(body.cardMessage,800),notes:clean(body.notes,500),paymentStatus:old.paid===0?"Chưa thanh toán":old.paid<total?"Đã cọc":"Đã thanh toán đủ",subtotal,discount,shippingFee,total,remaining:total-old.paid,itemProductId:product?.id??null,itemName,itemSku:product?.sku||"CUSTOM",quantity,unitPrice};put("orders",id,updated);
@@ -141,13 +230,13 @@ const id=Number(body.id),old=getById(data.staff,id,"nhân viên"),name=clean(bod
     }else if(action==="updateOrderStatus"){
       const id=Number(body.id),status=clean(body.status,50),order=getById(data.orders,id,"đơn hàng"),delivery=data.deliveries.find(item=>item.orderId===id);if(status==="Hoàn thành"&&(delivery?.status!=="Đã giao"||order.paid<order.total))throw new Error("Chỉ hoàn thành khi đơn đã giao và đã thu đủ tiền");put("orders",id,{...order,status});const productionStatus:Record<string,string>={"Mới":"Chưa làm","Đã xác nhận":"Chưa làm","Đã cọc":"Chưa làm","Đang chuẩn bị":"Đang làm","Chờ kiểm tra":"Chờ kiểm tra","Chờ giao":"Chờ kiểm tra","Đang giao":"Chờ kiểm tra","Đã hoàn thiện":"Đã hoàn thiện","Hoàn thành":"Đã hoàn thiện"},deliveryStatus:Record<string,string>={"Chờ giao":"Chờ giao","Đang giao":"Đang giao","Đã hoàn thiện":"Đã giao","Hoàn thành":"Đã giao"};const production=data.production.find(item=>item.orderId===id);if(production&&productionStatus[status])put("production",production.id,{...production,status:productionStatus[status]});if(delivery&&deliveryStatus[status])put("deliveries",delivery.id,{...delivery,status:deliveryStatus[status]});addLog(id,"Cập nhật trạng thái",`Chuyển đơn sang ${status}`);
     }else if(action==="addPayment"){
-      const orderId=Number(body.orderId),amount=money(body.amount),order=getById(data.orders,orderId,"đơn hàng"),delivery=data.deliveries.find(item=>item.orderId===orderId);if(amount<=0||amount>order.remaining)throw new Error("Số tiền thanh toán không hợp lệ");const paid=order.paid+amount,completed=paid>=order.total&&delivery?.status==="Đã giao",paymentStatus=paid>=order.total?"Đã thanh toán đủ":"Đã cọc",updated={...order,paid,remaining:order.total-paid,paymentStatus,status:completed?"Hoàn thành":order.status};put("orders",orderId,updated);if(delivery)put("deliveries",delivery.id,{...delivery,cod:updated.remaining});const id=nextId(data.payments),payment:Payment={id,orderId,orderCode:order.code,customerName:order.customerName,amount,method:clean(body.method,40),reference:clean(body.reference,80),notes:clean(body.notes,300),paidAt:now(),staffName:"Ngọc Lan"};put("payments",id,payment);for(const invoice of data.invoices.filter(item=>item.orderId===orderId))put("invoices",invoice.id,{...invoice,paid,remaining:updated.remaining,paymentStatus});addLog(orderId,"Ghi nhận thanh toán",`${amount.toLocaleString("vi-VN")}đ qua ${payment.method}${completed?" · đơn đã hoàn thành":""}`);
+      const orderId=Number(body.orderId),amount=money(body.amount),order=getById(data.orders,orderId,"đơn hàng"),delivery=data.deliveries.find(item=>item.orderId===orderId);if(amount<=0||amount>order.remaining)throw new Error("Số tiền thanh toán không hợp lệ");const paid=order.paid+amount,completed=paid>=order.total&&delivery?.status==="Đã giao",paymentStatus=paid>=order.total?"Đã thanh toán đủ":"Đã cọc",updated={...order,paid,remaining:order.total-paid,paymentStatus,status:completed?"Hoàn thành":order.status};put("orders",orderId,updated);if(delivery)put("deliveries",delivery.id,{...delivery,cod:updated.remaining});const id=nextId(data.payments),payment:Payment={id,orderId,orderCode:order.code,customerName:order.customerName,amount,method:clean(body.method,40),reference:clean(body.reference,80),notes:clean(body.notes,300),paidAt:now(),staffName:actorName};put("payments",id,payment);for(const invoice of data.invoices.filter(item=>item.orderId===orderId))put("invoices",invoice.id,{...invoice,paid,remaining:updated.remaining,paymentStatus});addLog(orderId,"Ghi nhận thanh toán",`${amount.toLocaleString("vi-VN")}đ qua ${payment.method}${completed?" · đơn đã hoàn thành":""}`);
     }else if(action==="createExpense"){
-      const date=clean(body.date,10)||today(),category=clean(body.category,80)||"Khác",amount=money(body.amount);if(amount<=0)throw new Error("Số tiền chi phí không hợp lệ");const id=nextId(data.expenses),expense:Expense={id,date,category,amount,vendor:clean(body.vendor,160),paymentMethod:clean(body.paymentMethod,40)||"Tiền mặt",notes:clean(body.notes,400),createdAt:now(),staffName:"Ngọc Lan"};put("expenses",id,expense);addLog(0,"Ghi nhận chi phí",`${category} · ${amount.toLocaleString("vi-VN")}đ`,"Ngọc Lan");
+      const date=clean(body.date,10)||today(),category=clean(body.category,80)||"Khác",amount=money(body.amount);if(amount<=0)throw new Error("Số tiền chi phí không hợp lệ");const id=nextId(data.expenses),expense:Expense={id,date,category,amount,vendor:clean(body.vendor,160),paymentMethod:clean(body.paymentMethod,40)||"Tiền mặt",notes:clean(body.notes,400),createdAt:now(),staffName:actorName};put("expenses",id,expense);addLog(0,"Ghi nhận chi phí",`${category} · ${amount.toLocaleString("vi-VN")}đ`,actorName);
     }else if(action==="updateExpense"){
-      const id=Number(body.id),old=getById(data.expenses,id,"chi phí"),amount=money(body.amount);if(amount<=0)throw new Error("Số tiền chi phí không hợp lệ");const expense:Expense={...old,date:clean(body.date,10)||old.date,category:clean(body.category,80)||old.category,amount,vendor:clean(body.vendor,160),paymentMethod:clean(body.paymentMethod,40)||old.paymentMethod,notes:clean(body.notes,400)};put("expenses",id,expense);addLog(0,"Cập nhật chi phí",`${expense.category} · ${amount.toLocaleString("vi-VN")}đ`,"Ngọc Lan");
+      const id=Number(body.id),old=getById(data.expenses,id,"chi phí"),amount=money(body.amount);if(amount<=0)throw new Error("Số tiền chi phí không hợp lệ");const expense:Expense={...old,date:clean(body.date,10)||old.date,category:clean(body.category,80)||old.category,amount,vendor:clean(body.vendor,160),paymentMethod:clean(body.paymentMethod,40)||old.paymentMethod,notes:clean(body.notes,400)};put("expenses",id,expense);addLog(0,"Cập nhật chi phí",`${expense.category} · ${amount.toLocaleString("vi-VN")}đ`,actorName);
     }else if(action==="deleteExpense"){
-      remove("expenses",Number(body.id));addLog(0,"Xóa chi phí",clean(body.label,120)||"Đã xóa một khoản chi","Ngọc Lan");
+      remove("expenses",Number(body.id));addLog(0,"Xóa chi phí",clean(body.label,120)||"Đã xóa một khoản chi",actorName);
     }else if(action==="createInvoice"){
       const orderId=Number(body.orderId),order=getById(data.orders,orderId,"đơn hàng");if(!data.invoices.some(item=>item.orderId===orderId)){const id=nextId(data.invoices),invoice:Invoice={id,number:`INV-${new Date().toISOString().slice(2,7).replace("-","")}-${String(id).padStart(4,"0")}`,orderId,orderCode:order.code,customerName:order.customerName,total:order.total,status:"Đã phát hành",issuedAt:now(),customerPhone:order.customerPhone,customerAddress:order.deliveryAddress,subtotal:order.subtotal,discount:order.discount,shippingFee:order.shippingFee,surcharge:order.surcharge,paid:order.paid,remaining:order.remaining,paymentStatus:order.paymentStatus,itemName:order.itemName,quantity:order.quantity,unitPrice:order.unitPrice};put("invoices",id,invoice)}
     }else if(action==="updateProductionStatus"){

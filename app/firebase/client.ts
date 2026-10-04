@@ -1,6 +1,6 @@
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { getAnalytics, isSupported } from "firebase/analytics";
-import { createUserWithEmailAndPassword, getAuth, signOut, updateProfile } from "firebase/auth";
+import { createUserWithEmailAndPassword, deleteUser, getAuth, signOut, updateProfile } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -24,11 +24,25 @@ export async function initializeFirebaseAnalytics() {
 
 const staffCreatorAppName = "flore-staff-account-creator";
 
-export async function createStaffAuthAccount(email: string, password: string, name: string) {
+export async function createStaffAuthAccount(email: string, password: string, name: string, persist?: (uid: string) => Promise<void>) {
   const app = getApps().find((item) => item.name === staffCreatorAppName) ?? initializeApp(firebaseConfig, staffCreatorAppName);
   const auth = getAuth(app);
-  const credential = await createUserWithEmailAndPassword(auth, email, password);
-  if (name) await updateProfile(credential.user, { displayName: name });
-  await signOut(auth);
-  return credential.user.uid;
+  try {
+    const credential = await createUserWithEmailAndPassword(auth, email, password);
+    try {
+      if (name) await updateProfile(credential.user, { displayName: name });
+      if (persist) await persist(credential.user.uid);
+    }
+    catch (error) { await deleteUser(credential.user); throw error; }
+    return credential.user.uid;
+  } finally { await signOut(auth); }
+}
+
+export async function manageStaffAccount(body: Record<string, unknown>) {
+  const current = firebaseAuth.currentUser;
+  if (!current) throw new Error("Vui lòng đăng nhập trước.");
+  const response = await fetch("/api/staff-accounts", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${await current.getIdToken()}` }, body: JSON.stringify(body) });
+  const result = await response.json() as { error?: string; ok?: boolean };
+  if (!response.ok) throw new Error(result.error || "Không thể lưu tài khoản.");
+  return result;
 }

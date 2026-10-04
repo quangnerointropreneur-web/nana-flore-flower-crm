@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Eye, EyeOff, Flower2, LoaderCircle, LockKeyhole, LogIn, ShieldCheck } from "lucide-react";
 import { browserLocalPersistence, onAuthStateChanged, setPersistence, signInWithEmailAndPassword, signOut, type User } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
+import { doc, getDoc, onSnapshot } from "firebase/firestore";
 import type { AuthUser } from "../types";
 import { firebaseAuth, firestore, initializeFirebaseAnalytics, MANAGER_UID } from "../firebase/client";
 import FlowerCRM from "./FlowerCRM";
@@ -31,6 +31,15 @@ export default function AuthGate(){
   const [showPassword,setShowPassword]=useState(false);
 
   useEffect(()=>{let active=true;void initializeFirebaseAnalytics();const stop=onAuthStateChanged(firebaseAuth,current=>{void (async()=>{try{if(current){const resolved=await resolveAuthUser(current);if(active)setUser(resolved)}else if(active)setUser(null)}catch{await signOut(firebaseAuth);if(active)setUser(null)}finally{if(active)setChecking(false)}})()});return()=>{active=false;stop()}},[]);
+
+  useEffect(()=>{
+    if(!user||user.id===MANAGER_UID)return;
+    return onSnapshot(doc(firestore,"flore_stores","default","staffAuth",String(user.id)),snapshot=>{
+      const membership=snapshot.data();
+      if(!snapshot.exists()||membership?.active!==true){void signOut(firebaseAuth);setUser(null);setError("Tài khoản đã bị khóa hoặc thu hồi quyền truy cập.");return}
+      setUser(previous=>previous?{...previous,name:membership.name||previous.name,email:membership.email||previous.email,role:membership.role}:null);
+    },()=>{void signOut(firebaseAuth);setUser(null);setError("Tài khoản không còn quyền truy cập cửa hàng.")});
+  },[user?.id]);
 
   const login=async(event:React.FormEvent<HTMLFormElement>)=>{event.preventDefault();setSaving(true);setError("");try{await setPersistence(firebaseAuth,browserLocalPersistence);const credential=await signInWithEmailAndPassword(firebaseAuth,email.trim(),password);setUser(await resolveAuthUser(credential.user))}catch(cause){await signOut(firebaseAuth).catch(()=>undefined);setError(authError(cause))}finally{setSaving(false)}};
   const logout=async()=>{await signOut(firebaseAuth);setUser(null);setPassword("")};

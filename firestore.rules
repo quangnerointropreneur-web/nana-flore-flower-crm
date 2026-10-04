@@ -34,9 +34,18 @@ service cloud.firestore {
     }
 
     match /flore_stores/default/staffAuth/{uid} {
-      allow read: if isFloreManager()
+      allow read: if canManageStore()
         || (request.auth != null && request.auth.uid == uid && resource.data.active == true);
-      allow write: if isFloreManager();
+      allow create, update: if canManageStore()
+        && uid != 'kyEi7WdhTdZ7HfpI9PxxxVLbqNR2'
+        && request.resource.data.uid == uid
+        && request.resource.data.role in ['manager', 'sales', 'florist', 'delivery', 'accountant']
+        && request.resource.data.active is bool
+        && (request.auth.uid != uid
+          || (request.resource.data.role == 'manager' && request.resource.data.active == true));
+      allow delete: if canManageStore()
+        && uid != 'kyEi7WdhTdZ7HfpI9PxxxVLbqNR2'
+        && request.auth.uid != uid;
     }
 
     match /flore_stores/default/meta/{docId} {

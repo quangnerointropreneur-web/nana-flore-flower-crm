@@ -4,12 +4,12 @@ import test from "node:test";
 
 const templateRoot = new URL("../", import.meta.url);
 
-async function render() {
+async function render(path = "/", method = "GET") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
   return worker.fetch(
-    new Request("http://localhost/", { headers: { accept: "text/html" } }),
+    new Request(`http://localhost${path}`, { method, headers: { accept: "text/html" } }),
     { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
     { waitUntil() {}, passThroughOnException() {} },
   );
@@ -26,6 +26,12 @@ test("server-renders the Floré authentication shell", async () => {
   assert.match(html, /Đang kiểm tra phiên đăng nhập/);
   assert.doesNotMatch(html, /Tổng quan|Tạo đơn/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
+});
+
+test("deployed Worker exposes the account endpoint only to authenticated managers", async () => {
+  const response = await render("/api/staff-accounts", "POST");
+  assert.equal(response.status, 401);
+  assert.match((await response.json()).error, /đăng nhập/);
 });
 
 test("ships the Firebase-backed application configuration", async () => {

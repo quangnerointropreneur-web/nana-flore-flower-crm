@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { hashPassword } from "./auth";
+import { buildSeedStore } from "../app/firebase/seed";
 
 type D1ResultRow = Record<string, unknown>;
 
@@ -28,13 +29,6 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at)`,
 ];
 
-const names = ["Nguyễn Minh Anh","Trần Hoàng Nam","Lê Thu Hà","Phạm Gia Hân","Đỗ Nhật Minh","Vũ Thanh Tú","Bùi Bảo Ngọc","Hoàng Đức Anh","Nguyễn Quỳnh Chi","Lâm Ngọc Mai","Công ty An Nhiên","Studio Nắng","Trương Quốc Bảo","Lý Phương Linh","Hồ Hải Yến","Đặng Khánh Vy","Mai Tuấn Kiệt","Phan Thảo My","Công ty Mây Việt","Ngô Minh Khang"];
-const productSeed = [
-  ["BH-001","Bó hồng Pastel","Bó hoa",850000,470000,"🌸"],["GH-002","Giỏ hoa Nắng Mai","Giỏ hoa",1250000,680000,"🌻"],["HH-003","Hộp hoa Mộng Mơ","Hộp hoa",980000,520000,"🌷"],["KT-004","Kệ hoa Khai Trương","Hoa khai trương",2200000,1350000,"🌺"],["SN-005","Bó tulip Sinh Nhật","Hoa sinh nhật",1150000,650000,"💐"],["CB-006","Vòng hoa Chia Buồn","Hoa chia buồn",1800000,1100000,"🤍"],["HQ-007","Set hoa & Chocolate","Set hoa + quà",1450000,820000,"🎁"],["CH-008","Bó cẩm chướng Dịu Dàng","Bó hoa",720000,390000,"🌷"],["CU-009","Hoa cưới Trắng Tinh","Hoa cưới",1600000,920000,"🤍"],["TC-010","Giỏ trái cây Premium","Trái cây",1350000,880000,"🍎"],["QT-011","Gấu bông Teddy","Quà tặng",350000,190000,"🧸"],["TH-012","Thiệp viết tay","Thiệp",50000,12000,"💌"],["PK-013","Bóng bay trang trí","Phụ kiện",120000,45000,"🎈"],["HO-014","Bó hướng dương Rực Rỡ","Bó hoa",780000,420000,"🌻"],["LY-015","Bó lily Thanh Nhã","Bó hoa",1050000,580000,"🪷"],
-] as const;
-const statuses = ["Mới","Đã xác nhận","Đã cọc","Đang chuẩn bị","Đã hoàn thiện","Chờ giao","Đang giao","Đã giao","Hoàn thành"];
-const sources = ["Facebook","Instagram","Zalo","Website","TikTok","Khách tại cửa hàng"];
-
 async function ensureDefaultAccount(){
   const exists=await env.DB.prepare("SELECT id FROM auth_accounts LIMIT 1").first();
   if(exists)return;
@@ -50,75 +44,9 @@ export async function ensureDatabase() {
   const db = env.DB;
   if (!db) throw new Error("D1 binding DB is unavailable");
   await db.batch(schemaStatements.map((statement) => db.prepare(statement)));
-  const count = await db.prepare("SELECT COUNT(*) AS count FROM customers").first<{ count: number }>();
-  if ((count?.count ?? 0) > 0) { await ensureDefaultAccount(); await db.prepare("PRAGMA optimize").run(); return; }
-
-  await db.batch([
-    ["Ngọc Lan","lan@flore.vn","0909000101","manager"],["Nero Nguyễn","nero@flore.vn","0909000102","sales"],["Mai Hoa","hoa@flore.vn","0909000103","florist"],["Đức Long","long@flore.vn","0909000104","delivery"],["Thảo Vy","vy@flore.vn","0909000105","accountant"],
-  ].map((s) => db.prepare("INSERT INTO staff (name,email,phone,role) VALUES (?,?,?,?)").bind(...s)));
+  const settings=buildSeedStore().settings;
+  await db.batch(Object.entries(settings).map(([key,value])=>db.prepare("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)").bind(key,JSON.stringify(value))));
   await ensureDefaultAccount();
-
-  await db.batch(names.map((name, index) => db.prepare("INSERT INTO customers (code,type,name,phone,email,address,source,staff_id,company,segment,tags,first_order_at,last_order_at,total_orders,total_spent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(
-    `CUS-${String(index + 1).padStart(4,"0")}`,
-    name.includes("Công ty") || name.includes("Studio") ? "business" : "individual",
-    name,
-    `09${String(12000000 + index * 37691).slice(-8)}`,
-    `khach${index + 1}@example.com`,
-    `${18 + index} Đường Hoa Hồng, ${index % 3 === 0 ? "Quận 1" : index % 3 === 1 ? "Quận 3" : "Thủ Đức"}, TP.HCM`,
-    sources[index % sources.length],
-    (index % 2) + 1,
-    name.includes("Công ty") || name.includes("Studio") ? name : "",
-    index < 2 ? "VIP" : index < 7 ? "Thân thiết" : index < 14 ? "Quay lại" : "Mới",
-    JSON.stringify(index < 3 ? ["Khách VIP","Hay mua > 1 triệu"] : [index % 2 ? "Hoa sinh nhật" : "Hoa kỷ niệm"]),
-    "2025-09-12",
-    `2026-08-${String(2 + (index % 13)).padStart(2,"0")}`,
-    index < 2 ? 12 - index : 1 + (index % 7),
-    index < 2 ? 18450000 - index * 3200000 : 680000 + index * 375000,
-  )));
-
-  await db.batch(productSeed.map((p, index) => db.prepare("INSERT INTO products (sku,name,category,price,cost,image,status,sold,revenue) VALUES (?,?,?,?,?,?,?,?,?)").bind(p[0],p[1],p[2],p[3],p[4],p[5], index === 11 ? "hidden" : index === 8 ? "out_of_stock" : "active", 8 + (index * 7) % 42, (8 + (index * 7) % 42) * p[3])));
-
-  for (let index = 0; index < 30; index += 1) {
-    const customerIndex = index % names.length;
-    const productIndex = (index * 3) % productSeed.length;
-    const product = productSeed[productIndex];
-    const quantity = index % 7 === 0 ? 2 : 1;
-    const subtotal = product[3] * quantity;
-    const discount = index % 6 === 0 ? 100000 : 0;
-    const shipping = index % 5 === 0 ? 0 : 50000 + (index % 3) * 15000;
-    const total = subtotal - discount + shipping;
-    const paid = index % 4 === 0 ? Math.round(total * .4) : index % 5 === 0 ? 0 : total;
-    const status = statuses[index % statuses.length];
-    const deliveryDay = String(15 + (index % 4)).padStart(2,"0");
-    const time = `${String(9 + (index % 10)).padStart(2,"0")}:${index % 2 ? "30" : "00"}`;
-    const code = `FH-260815-${String(index + 1).padStart(3,"0")}`;
-    const orderInsert = await db.prepare("INSERT INTO orders (code,customer_id,customer_name,customer_phone,source,staff_id,recipient_name,recipient_phone,delivery_address,maps_url,delivery_date,delivery_time,delivery_type,card_message,notes,status,payment_status,subtotal,discount,shipping_fee,surcharge,total,paid,due_date,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id").bind(
-      code, customerIndex + 1, names[customerIndex], `09${String(12000000 + customerIndex * 37691).slice(-8)}`, sources[index % sources.length], (index % 2) + 1,
-      index % 3 === 0 ? "Chị Thu" : names[customerIndex], `09${String(45000000 + index * 18433).slice(-8)}`,
-      `${42 + index} ${index % 2 ? "Nguyễn Huệ" : "Lê Lợi"}, ${index % 3 === 0 ? "Quận 1" : index % 3 === 1 ? "Quận 3" : "Thủ Đức"}, TP.HCM`,
-      "https://maps.google.com", `2026-08-${deliveryDay}`, time, index % 9 === 0 ? "pickup" : "delivery",
-      index % 2 ? "Chúc em một ngày thật nhiều niềm vui và hạnh phúc!" : "Happy birthday! Luôn rạng rỡ nhé.",
-      index % 8 === 0 ? "Khách dặn giao nhẹ tay, gọi trước 10 phút." : "", status,
-      paid === 0 ? "Chưa thanh toán" : paid < total ? "Đã cọc" : "Đã thanh toán đủ", subtotal, discount, shipping, 0, total, paid,
-      paid < total ? "2026-08-20" : "", `2026-08-${String(1 + (index % 15)).padStart(2,"0")} ${String(8 + (index % 9)).padStart(2,"0")}:30:00`,
-    ).first<{id:number}>();
-    const orderId = orderInsert?.id ?? index + 1;
-    await db.batch([
-      db.prepare("INSERT INTO order_items (order_id,product_id,name,sku,quantity,unit_price,discount,total,is_custom,custom_details) VALUES (?,?,?,?,?,?,?,?,?,?)").bind(orderId, productIndex + 1, product[1], product[0], quantity, product[3], discount, subtotal - discount, 0, "{}"),
-      db.prepare("INSERT INTO delivery (order_id,shipper_id,status,cod,fee,notes) VALUES (?,?,?,?,?,?)").bind(orderId, 4, status === "Đã giao" || status === "Hoàn thành" ? "Đã giao" : status === "Đang giao" ? "Đang giao" : "Chờ giao", total - paid, shipping, "Gọi người nhận trước khi đến"),
-      db.prepare("INSERT INTO production_tasks (order_id,florist_id,status,due_at,tone,flower_types,instructions) VALUES (?,?,?,?,?,?,?)").bind(orderId, 3, ["Chưa làm","Đang làm","Chờ kiểm tra","Đã hoàn thiện"][index % 4], `2026-08-${deliveryDay} ${time}:00`, ["Pastel hồng","Trắng xanh","Vàng cam","Đỏ burgundy"][index % 4], ["Hồng Ecuador","Tulip","Hướng dương","Cẩm chướng"][index % 4], "Cắm thoáng, dáng tự nhiên, nơ lụa đồng màu"),
-      db.prepare("INSERT INTO activity_logs (order_id,staff_id,action,details) VALUES (?,?,?,?)").bind(orderId, 2, "Tạo đơn", `${names[customerIndex]} đặt ${product[1]}`),
-    ]);
-    if (paid > 0) await db.prepare("INSERT INTO payments (order_id,amount,method,reference,notes,paid_at,staff_id) VALUES (?,?,?,?,?,?,?)").bind(orderId, paid, index % 3 === 0 ? "Chuyển khoản" : index % 3 === 1 ? "QR" : "Tiền mặt", `PAY-${String(index + 1).padStart(4,"0")}`, index % 4 === 0 ? "Tiền cọc" : "Thanh toán đơn hàng", `2026-08-${String(1 + (index % 15)).padStart(2,"0")} 09:35:00`, 2).run();
-    if (index < 10) await db.prepare("INSERT INTO invoices (number,order_id,customer_name,total,status,issued_at) VALUES (?,?,?,?,?,?)").bind(`INV-2608-${String(index + 1).padStart(4,"0")}`, orderId, names[customerIndex], total, "Đã phát hành", `2026-08-${String(3 + index).padStart(2,"0")} 10:00:00`).run();
-  }
-
-  await db.batch([
-    db.prepare("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)").bind("shop", JSON.stringify({ name:"Floré Flower Studio", address:"128 Nguyễn Huệ, Quận 1, TP.HCM", hotline:"0909 123 456", website:"flore.vn", facebook:"facebook.com/floreflower", bank:"Vietcombank · 0123456789 · NGUYEN NGOC LAN", footer:"Cảm ơn quý khách đã tin tưởng Floré!" })),
-    db.prepare("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)").bind("invoice", JSON.stringify({ showPhone:true, showAddress:true, showDiscount:true, showShipping:true, showQr:true })),
-    db.prepare("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)").bind("workflow", JSON.stringify({ productGroups:["Hoa bó","Hoa giỏ","Hoa hộp","Hoa bình","Giỏ quả","Giỏ quả & hoa","Hoa sự kiện","Theo yêu cầu"], defaultShippingFee:50000, defaultFloristId:3, defaultShipperId:4 })),
-    db.prepare("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)").bind("notifications", JSON.stringify({ dueSoon:true, unpaid:true, specialOccasion:true })),
-  ]);
   await db.prepare("PRAGMA optimize").run();
 }
 
