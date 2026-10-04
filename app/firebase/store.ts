@@ -47,7 +47,7 @@ async function seedFirestore(){
 async function removeOldDemoData() {
   const user = firebaseAuth.currentUser;
   if (!user || user.uid !== MANAGER_UID) return;
-  const marker = metaDoc("demoCleanupV2");
+  const marker = metaDoc("demoCleanupV3");
   if ((await getDoc(marker)).exists()) return;
   const snapshots = await Promise.all(entityNames.map(name => getDocs(entityCollection(name))));
   await runTransaction(firestore, async transaction => {
@@ -62,16 +62,23 @@ async function removeOldDemoData() {
     const plan = demoCleanupPlan(data);
     // Demo staff were only directory records. Never delete a subsequently issued real login here.
     for (const staff of data.staff) if (staff.authUid) plan.staff.delete(staff.id);
+    const deletedCount=Object.values(plan).reduce((sum,ids)=>sum+ids.size,0);
+    // Retain a recovery copy before removing demo records from live lists.
+    if(deletedCount)transaction.set(metaDoc("demoCleanupV3Archive"),{archivedAt:now(),records:Object.fromEntries(entityNames.map(name=>[name,data[name].filter(item=>plan[name].has(item.id))]))});
     for (const name of entityNames) for (const id of plan[name]) transaction.delete(entityDoc(name, id));
     const retainedOrders = data.orders.filter(order => !plan.orders.has(order.id) && order.status !== "Hủy");
-    for (const customer of data.customers) if (!plan.customers.has(customer.id) && customer.createdAt === "2026-08-15 08:00:00" && customer.email === `khach${customer.id}@example.com`) {
+    const affectedCustomers=new Set(data.orders.filter(order=>plan.orders.has(order.id)).map(order=>order.customerId));
+    for (const customer of data.customers) if (!plan.customers.has(customer.id) && (affectedCustomers.has(customer.id) || (customer.createdAt === "2026-08-15 08:00:00" && customer.email === `khach${customer.id}@example.com`))) {
       const orders=retainedOrders.filter(order=>order.customerId===customer.id);
       transaction.set(entityDoc("customers",customer.id),{...customer,totalOrders:orders.length,totalSpent:orders.reduce((sum,order)=>sum+order.total,0),firstOrderAt:orders.map(order=>order.deliveryDate).sort()[0]||"",lastOrderAt:orders.map(order=>order.deliveryDate).sort().at(-1)||""});
     }
     for (const product of data.products) if (!plan.products.has(product.id) && product.createdAt === "2026-08-15 08:00:00") {
-      const orders=retainedOrders.filter(order=>order.itemProductId===product.id);
-      transaction.set(entityDoc("products",product.id),{...product,sold:orders.reduce((sum,order)=>sum+order.quantity,0),revenue:orders.reduce((sum,order)=>sum+order.subtotal-order.discount,0)});
+      let sold=0,revenue=0;
+      for(const order of retainedOrders){const items=getOrderItems(order,data.products),amounts=itemNetAmounts(items,order.discount);items.forEach((item,index)=>{if(item.productId===product.id){sold+=item.quantity;revenue+=amounts[index]}})}
+      transaction.set(entityDoc("products",product.id),{...product,sold,revenue});
     }
+    for(const task of data.production)if(!plan.production.has(task.id)&&plan.staff.has(task.floristId))transaction.set(entityDoc("production",task.id),{...task,floristId:0,floristName:"Chưa phân công"});
+    for(const task of data.deliveries)if(!plan.deliveries.has(task.id)&&plan.staff.has(task.shipperId))transaction.set(entityDoc("deliveries",task.id),{...task,shipperId:0,shipperName:"Chưa phân công"});
     if (settings.exists()) {
       const previous = settings.data() as StoreData["settings"];
       const shop = { ...previous.shop };
@@ -82,7 +89,7 @@ async function removeOldDemoData() {
       if (plan.staff.has(workflow.defaultShipperId)) workflow.defaultShipperId = 0;
       transaction.set(metaDoc("settings"), { ...previous, shop, workflow });
     }
-    transaction.set(marker, { completedAt: now(), deletedCount: Object.values(plan).reduce((sum, ids) => sum + ids.size, 0) });
+    transaction.set(marker, { completedAt: now(), deletedCount, counts:Object.fromEntries(entityNames.map(name=>[name,plan[name].size])) });
   });
 }
 

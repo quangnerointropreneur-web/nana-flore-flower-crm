@@ -50,7 +50,19 @@ export const runTransaction=async(_db,callback)=>{const batch=writeBatch();const
 const clientUri=uri(`export const firestore={};export const MANAGER_UID='kyEi7WdhTdZ7HfpI9PxxxVLbqNR2';export const firebaseAuth={currentUser:{uid:MANAGER_UID,email:'manager@example.com'}};export const createStaffAuthAccount=()=>{throw Error('Not expected')};export const manageStaffAccount=()=>{throw Error('Not expected')};`);
 let storeSource=await compile('../app/firebase/store.ts');
 for(const [name,value] of [['firebase/firestore',firestoreUri],['./client',clientUri],['./seed',seedUri],['./demo-cleanup',cleanupUri],['../order-items',helpersUri]])storeSource=storeSource.replaceAll(`"${name}"`,JSON.stringify(value));
-const {applyFirebaseAction}=await import(uri(storeSource));const {buildSeedStore}=await import(seedUri);
+const {applyFirebaseAction,loadFirebaseStore}=await import(uri(storeSource));const {buildSeedStore}=await import(seedUri);
+
+test('new cleanup pass clears demo records despite the old marker and keeps a recovery copy',async()=>{
+  const root='flore_stores/default/';const data=buildSeedStore();
+  const customer={id:1,name:'Nguyễn Minh Anh',email:'khach1@example.com',phone:'0912000000',createdAt:'2026-08-15 08:00:00',totalSpent:100,totalOrders:1};
+  const order={id:1,code:'FH-260815-001',createdAt:'2026-08-01 08:30:00',mapsUrl:'',customerId:1,status:'Mới'};
+  const realCustomer={...customer,id:50,name:'Khách thật',email:'real@example.com',createdAt:'2026-10-04 08:00:00'};
+  globalThis.__flowerOrderDocuments=new Map([[root+'meta/demoCleanupV2',{completedAt:'old'}],[root+'meta/bootstrap',{version:1}],[root+'meta/settings',data.settings],[root+'customers/1',customer],[root+'customers/50',realCustomer],[root+'orders/1',order]]);
+  let loaded=await loadFirebaseStore(false);assert.deepEqual(loaded.customers,[realCustomer]);assert.equal(loaded.orders.length,0);
+  const archive=globalThis.__flowerOrderDocuments.get(root+'meta/demoCleanupV3Archive');assert.equal(archive.records.customers[0].id,1);assert.equal(archive.records.orders[0].id,1);
+  assert.equal(globalThis.__flowerOrderDocuments.get(root+'meta/demoCleanupV3').deletedCount,2);
+  loaded=await loadFirebaseStore(false);assert.deepEqual(loaded.customers,[realCustomer]);assert.equal(globalThis.__flowerOrderDocuments.get(root+'meta/demoCleanupV3Archive').records.orders.length,1);
+});
 
 test('create, edit, invoice and delete keep every item and payment balance consistent',async()=>{
   globalThis.__flowerOrderDocuments=new Map();let data=buildSeedStore();

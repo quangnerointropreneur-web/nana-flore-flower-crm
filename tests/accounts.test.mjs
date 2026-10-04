@@ -27,6 +27,15 @@ test('demo cleanup preserves new records with reused ids and real order referenc
   assert.deepEqual([...plan.staff],[1]);assert.deepEqual([...plan.orders],[1]);assert.deepEqual([...plan.customers],[1]);assert.deepEqual([...plan.payments],[1]);
   assert.equal(demoCleanupPlan(buildSeedStore()).orders.size,0);
 });
+
+test('cleanup recognizes edited pickup demos and orphan records, without deleting real logins',()=>{
+  const data=buildSeedStore();
+  data.orders=[{id:1,code:'FH-260815-001',createdAt:'2026-08-01 08:30:00',mapsUrl:'',customerId:1},{id:2,code:'FH-260815-002',createdAt:'2026-08-15 11:30:00',customerId:2}];
+  data.staff=[{id:1,email:'lan@flore.vn',createdAt:'2026-08-15 08:00:00',authUid:'real-issued-login'}];
+  data.payments=[{id:1,orderId:3,orderCode:'FH-260815-003',paidAt:'2026-08-03 10:30:00'},{id:2,orderId:2,orderCode:'FH-260815-002',paidAt:'2026-08-02 09:30:00'}];
+  const plan=demoCleanupPlan(data);
+  assert.deepEqual([...plan.orders],[1]);assert.deepEqual([...plan.payments],[1]);assert.equal(plan.staff.size,0);
+});
 test('account management rejects anonymous and cross-origin requests without Firebase calls',async()=>{
   const oldFetch=globalThis.fetch;globalThis.fetch=()=>{throw Error('Unexpected Firebase call')};
   try{
