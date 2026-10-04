@@ -49,19 +49,44 @@ export const runTransaction=async(_db,callback)=>{const batch=writeBatch();const
 `);
 const clientUri=uri(`export const firestore={};export const MANAGER_UID='kyEi7WdhTdZ7HfpI9PxxxVLbqNR2';export const firebaseAuth={currentUser:{uid:MANAGER_UID,email:'manager@example.com'}};export const createStaffAuthAccount=()=>{throw Error('Not expected')};export const manageStaffAccount=()=>{throw Error('Not expected')};`);
 let storeSource=await compile('../app/firebase/store.ts');
-for(const [name,value] of [['firebase/firestore',firestoreUri],['./client',clientUri],['./seed',seedUri],['./demo-cleanup',cleanupUri],['../order-items',helpersUri]])storeSource=storeSource.replaceAll(`"${name}"`,JSON.stringify(value));
+const resetUri=uri((await compile('../app/firebase/sales-reset.ts')).replaceAll('"firebase/firestore"',JSON.stringify(firestoreUri)).replaceAll('"./client"',JSON.stringify(clientUri)));
+const {resetConfirmedSalesData,SALES_RESET_ID,SALES_COLLECTIONS}=await import(resetUri);
+for(const [name,value] of [['firebase/firestore',firestoreUri],['./client',clientUri],['./seed',seedUri],['./sales-reset',resetUri],['../order-items',helpersUri]])storeSource=storeSource.replaceAll(`"${name}"`,JSON.stringify(value));
 const {applyFirebaseAction,loadFirebaseStore}=await import(uri(storeSource));const {buildSeedStore}=await import(seedUri);
 
-test('new cleanup pass clears demo records despite the old marker and keeps a recovery copy',async()=>{
+test('confirmed reset clears old records despite demo markers and preserves records created later',async()=>{
   const root='flore_stores/default/';const data=buildSeedStore();
   const customer={id:1,name:'Nguyễn Minh Anh',email:'khach1@example.com',phone:'0912000000',createdAt:'2026-08-15 08:00:00',totalSpent:100,totalOrders:1};
   const order={id:1,code:'FH-260815-001',createdAt:'2026-08-01 08:30:00',mapsUrl:'',customerId:1,status:'Mới'};
-  const realCustomer={...customer,id:50,name:'Khách thật',email:'real@example.com',createdAt:'2026-10-04 08:00:00'};
+  const realCustomer={...customer,id:50,name:'Khách thật',email:'real@example.com',createdAt:'2027-01-01 08:00:00'};
   globalThis.__flowerOrderDocuments=new Map([[root+'meta/demoCleanupV2',{completedAt:'old'}],[root+'meta/bootstrap',{version:1}],[root+'meta/settings',data.settings],[root+'customers/1',customer],[root+'customers/50',realCustomer],[root+'orders/1',order]]);
   let loaded=await loadFirebaseStore(false);assert.deepEqual(loaded.customers,[realCustomer]);assert.equal(loaded.orders.length,0);
-  const archive=globalThis.__flowerOrderDocuments.get(root+'meta/demoCleanupV3Archive');assert.equal(archive.records.customers[0].id,1);assert.equal(archive.records.orders[0].id,1);
-  assert.equal(globalThis.__flowerOrderDocuments.get(root+'meta/demoCleanupV3').deletedCount,2);
-  loaded=await loadFirebaseStore(false);assert.deepEqual(loaded.customers,[realCustomer]);assert.equal(globalThis.__flowerOrderDocuments.get(root+'meta/demoCleanupV3Archive').records.orders.length,1);
+  const archives=[...globalThis.__flowerOrderDocuments.values()].filter(row=>row.sourcePath);
+  assert.equal(archives.length,2);assert.equal(archives.find(row=>row.sourcePath.endsWith('/orders/1')).record.id,1);
+  assert.equal(globalThis.__flowerOrderDocuments.get(root+'meta/'+SALES_RESET_ID).deletedCount,2);
+  loaded=await loadFirebaseStore(false);assert.deepEqual(loaded.customers,[realCustomer]);assert.equal(loaded.salesReset.completed,true);
+});
+
+test('reset uses actual document paths, handles multiple chunks, and never removes settings or accounts',async()=>{
+  const root='flore_stores/default/';globalThis.__flowerOrderDocuments=new Map([[root+'meta/settings',{shop:{name:'Cửa hàng thật'}}],[root+'staff/1',{id:1,authUid:'active-user'}],[root+'staffAuth/active-user',{role:'manager',active:true}]]);
+  for(const name of SALES_COLLECTIONS)for(let i=0;i<(name==='customers'?110:1);i++)globalThis.__flowerOrderDocuments.set(root+name+'/random-document-'+i,{id:9000+i,createdAt:'2026-01-01 08:00:00'});
+  const result=await resetConfirmedSalesData();assert.equal(result.deletedCount,120);assert.equal(result.remainingCount,0);
+  for(const name of SALES_COLLECTIONS)assert.equal([...globalThis.__flowerOrderDocuments.keys()].filter(path=>path.startsWith(root+name+'/')).length,0);
+  assert.ok(globalThis.__flowerOrderDocuments.has(root+'staff/1'));assert.ok(globalThis.__flowerOrderDocuments.has(root+'staffAuth/active-user'));assert.equal(globalThis.__flowerOrderDocuments.get(root+'meta/settings').shop.name,'Cửa hàng thật');
+  assert.equal([...globalThis.__flowerOrderDocuments.values()].filter(row=>row.sourcePath).length,120);
+  globalThis.__flowerOrderDocuments.set(root+'customers/new',{id:1,createdAt:'2026-01-01 08:00:00'});
+  assert.equal((await resetConfirmedSalesData()).deletedCount,120);assert.ok(globalThis.__flowerOrderDocuments.has(root+'customers/new'));
+});
+
+test('only active managers may reset; a newly entered order and linked records survive',async()=>{
+  const {firebaseAuth,MANAGER_UID}=await import(clientUri),owner=firebaseAuth.currentUser;
+  const root='flore_stores/default/';globalThis.__flowerOrderDocuments=new Map([[root+'staffAuth/employee',{role:'sales',active:true}],[root+'customers/1',{id:1,createdAt:'2026-01-01'}],[root+'orders/new',{id:500,customerId:1,createdAt:'2027-01-01'}],[root+'production/new',{id:1,orderId:500}]]);
+  try{
+    firebaseAuth.currentUser={uid:'employee'};assert.equal(await resetConfirmedSalesData(),null);assert.ok(globalThis.__flowerOrderDocuments.has(root+'customers/1'));
+    globalThis.__flowerOrderDocuments.set(root+'staffAuth/employee',{role:'manager',active:true});
+    const result=await resetConfirmedSalesData();assert.equal(result.deletedCount,0);assert.equal(result.remainingCount,3);
+    assert.ok(globalThis.__flowerOrderDocuments.has(root+'customers/1'));assert.ok(globalThis.__flowerOrderDocuments.has(root+'production/new'));
+  }finally{firebaseAuth.currentUser=owner}
 });
 
 test('create, edit, invoice and delete keep every item and payment balance consistent',async()=>{

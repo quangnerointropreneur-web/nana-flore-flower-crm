@@ -15,7 +15,8 @@ export type ShopSettings = { name:string;address:string;hotline:string;website:s
 export type InvoiceSettings = { showPhone:boolean;showAddress:boolean;showDiscount:boolean;showShipping:boolean;showQr:boolean };
 export type WorkflowSettings = { productGroups:string[];defaultShippingFee:number;defaultFloristId:number;defaultShipperId:number };
 export type NotificationSettings = { dueSoon:boolean;unpaid:boolean;specialOccasion:boolean };
-export type StoreData = { customers:Customer[];recipients:CustomerRecipient[];events:CustomerEvent[];products:Product[];orders:Order[];payments:Payment[];expenses:Expense[];invoices:Invoice[];staff:Staff[];production:ProductionTask[];deliveries:DeliveryTask[];logs:ActivityLog[];settings:{shop:ShopSettings;invoice:InvoiceSettings;workflow:WorkflowSettings;notifications:NotificationSettings} };
+export type SalesResetReport={completed:boolean;deletedCount:number;counts:Record<string,number>;completedAt:string;remainingCount:number};
+export type StoreData = {salesReset?:SalesResetReport; customers:Customer[];recipients:CustomerRecipient[];events:CustomerEvent[];products:Product[];orders:Order[];payments:Payment[];expenses:Expense[];invoices:Invoice[];staff:Staff[];production:ProductionTask[];deliveries:DeliveryTask[];logs:ActivityLog[];settings:{shop:ShopSettings;invoice:InvoiceSettings;workflow:WorkflowSettings;notifications:NotificationSettings} };
 export type ViewKey = "dashboard"|"orders"|"production"|"delivery"|"customers"|"occasions"|"products"|"invoices"|"payments"|"expenses"|"reports"|"staff"|"settings";
 export type AuthUser = { id:string|number;name:string;email:string;role:string;avatar:string };
 

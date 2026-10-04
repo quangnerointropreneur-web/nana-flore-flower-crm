@@ -1,9 +1,9 @@
 import { collection, deleteDoc, doc, DocumentData, getDoc, getDocs, runTransaction, writeBatch } from "firebase/firestore";
 import type { Customer, CustomerEvent, CustomerRecipient, DeliveryTask, Expense, Invoice, Order, Payment, Product, ProductionTask, Staff, StoreData } from "../types";
 import { createStaffAuthAccount, firebaseAuth, firestore, manageStaffAccount, MANAGER_UID } from "./client";
-import { demoCleanupPlan } from "./demo-cleanup";
 import { buildSeedStore } from "./seed";
 import { getOrderItems, itemsSubtotal, itemsSummary, itemNetAmounts, parseOrderItems } from "../order-items";
+import { resetConfirmedSalesData } from "./sales-reset";
 
 const root = ["flore_stores","default"] as const;
 const entityNames = ["customers","recipients","events","products","orders","payments","expenses","invoices","staff","production","deliveries","logs"] as const;
@@ -44,58 +44,10 @@ async function seedFirestore(){
   await batch.commit();
 }
 
-async function removeOldDemoData() {
-  const user = firebaseAuth.currentUser;
-  if (!user || user.uid !== MANAGER_UID) return;
-  const marker = metaDoc("demoCleanupV3");
-  if ((await getDoc(marker)).exists()) return;
-  const snapshots = await Promise.all(entityNames.map(name => getDocs(entityCollection(name))));
-  await runTransaction(firestore, async transaction => {
-    if ((await transaction.get(marker)).exists()) return;
-    const current = await Promise.all(snapshots.flatMap(snapshot => snapshot.docs).map(item => transaction.get(item.ref)));
-    const data = buildSeedStore();
-    for (const snapshot of current) if (snapshot.exists()) {
-      const name = snapshot.ref.parent.id as EntityName;
-      (data[name] as { id: number }[]).push(snapshot.data() as { id: number });
-    }
-    const settings = await transaction.get(metaDoc("settings"));
-    const plan = demoCleanupPlan(data);
-    // Demo staff were only directory records. Never delete a subsequently issued real login here.
-    for (const staff of data.staff) if (staff.authUid) plan.staff.delete(staff.id);
-    const deletedCount=Object.values(plan).reduce((sum,ids)=>sum+ids.size,0);
-    // Retain a recovery copy before removing demo records from live lists.
-    if(deletedCount)transaction.set(metaDoc("demoCleanupV3Archive"),{archivedAt:now(),records:Object.fromEntries(entityNames.map(name=>[name,data[name].filter(item=>plan[name].has(item.id))]))});
-    for (const name of entityNames) for (const id of plan[name]) transaction.delete(entityDoc(name, id));
-    const retainedOrders = data.orders.filter(order => !plan.orders.has(order.id) && order.status !== "Hủy");
-    const affectedCustomers=new Set(data.orders.filter(order=>plan.orders.has(order.id)).map(order=>order.customerId));
-    for (const customer of data.customers) if (!plan.customers.has(customer.id) && (affectedCustomers.has(customer.id) || (customer.createdAt === "2026-08-15 08:00:00" && customer.email === `khach${customer.id}@example.com`))) {
-      const orders=retainedOrders.filter(order=>order.customerId===customer.id);
-      transaction.set(entityDoc("customers",customer.id),{...customer,totalOrders:orders.length,totalSpent:orders.reduce((sum,order)=>sum+order.total,0),firstOrderAt:orders.map(order=>order.deliveryDate).sort()[0]||"",lastOrderAt:orders.map(order=>order.deliveryDate).sort().at(-1)||""});
-    }
-    for (const product of data.products) if (!plan.products.has(product.id) && product.createdAt === "2026-08-15 08:00:00") {
-      let sold=0,revenue=0;
-      for(const order of retainedOrders){const items=getOrderItems(order,data.products),amounts=itemNetAmounts(items,order.discount);items.forEach((item,index)=>{if(item.productId===product.id){sold+=item.quantity;revenue+=amounts[index]}})}
-      transaction.set(entityDoc("products",product.id),{...product,sold,revenue});
-    }
-    for(const task of data.production)if(!plan.production.has(task.id)&&plan.staff.has(task.floristId))transaction.set(entityDoc("production",task.id),{...task,floristId:0,floristName:"Chưa phân công"});
-    for(const task of data.deliveries)if(!plan.deliveries.has(task.id)&&plan.staff.has(task.shipperId))transaction.set(entityDoc("deliveries",task.id),{...task,shipperId:0,shipperName:"Chưa phân công"});
-    if (settings.exists()) {
-      const previous = settings.data() as StoreData["settings"];
-      const shop = { ...previous.shop };
-      const sample = { address: "128 Nguyễn Huệ, Quận 1, TP.HCM", hotline: "0909 123 456", website: "flore.vn", facebook: "facebook.com/floreflower", bank: "Vietcombank · 0123456789 · NGUYEN NGOC LAN" };
-      for (const key of Object.keys(sample) as (keyof typeof sample)[]) if (shop[key] === sample[key]) shop[key] = "";
-      const workflow = { ...previous.workflow };
-      if (plan.staff.has(workflow.defaultFloristId)) workflow.defaultFloristId = 0;
-      if (plan.staff.has(workflow.defaultShipperId)) workflow.defaultShipperId = 0;
-      transaction.set(metaDoc("settings"), { ...previous, shop, workflow });
-    }
-    transaction.set(marker, { completedAt: now(), deletedCount, counts:Object.fromEntries(entityNames.map(name=>[name,plan[name].size])) });
-  });
-}
 
 export async function loadFirebaseStore(allowSeed=true):Promise<StoreData>{
   try{
-    await removeOldDemoData();
+    const salesReset=await resetConfirmedSalesData();
     const bootstrap=await getDoc(metaDoc("bootstrap"));
     if(!bootstrap.exists()&&allowSeed){await seedFirestore();return loadFirebaseStore(false)}
     const [customers,recipients,events,products,orders,payments,expenses,invoices,staff,production,deliveries,logs,settingsSnapshot]=await Promise.all([
@@ -103,6 +55,7 @@ export async function loadFirebaseStore(allowSeed=true):Promise<StoreData>{
     ]);
     const fallback=buildSeedStore().settings;
     return {
+      salesReset:salesReset||undefined,
       customers:customers.sort((a,b)=>b.totalSpent-a.totalSpent||b.id-a.id),
       recipients:recipients.sort((a,b)=>a.customerId-b.customerId||b.id-a.id),
       events:events.sort((a,b)=>a.eventDate.slice(5).localeCompare(b.eventDate.slice(5))||b.id-a.id),
