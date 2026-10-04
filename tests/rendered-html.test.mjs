@@ -4,6 +4,11 @@ import test from "node:test";
 
 const templateRoot = new URL("../", import.meta.url);
 
+test("routine pages do not display the historical sales cleanup notice", async () => {
+  const component = await readFile(new URL("../app/components/FlowerCRM.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(component, /sales-reset-notice|Đã hoàn tất dọn dữ liệu bán hàng cũ/);
+});
+
 async function render(path = "/", method = "GET") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);

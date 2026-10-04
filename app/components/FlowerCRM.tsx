@@ -80,7 +80,6 @@ export default function FlowerCRM({user,onLogout}:{user:AuthUser;onLogout:()=>vo
       </header>
       <div className="page-canvas">
         {loading?<LoadingState/>:error?<ErrorState message={error} retry={load}/>:<>
-          {user.role==="manager"&&data.salesReset?.completed&&<div className="auth-logic-note sales-reset-notice" role="status"><ShieldCheck size={18}/><span><strong>Đã hoàn tất dọn dữ liệu bán hàng cũ</strong><small>Đã xóa {data.salesReset.deletedCount} bản ghi: {data.salesReset.counts.customers||0} khách hàng · {data.salesReset.counts.orders||0} đơn · {data.salesReset.counts.events||0} dịp · {data.salesReset.counts.invoices||0} hóa đơn · {data.salesReset.counts.payments||0} thanh toán. Tài khoản, cài đặt và dữ liệu nhập mới được giữ lại. Có bản lưu khôi phục.</small></span></div>}
           {view==="dashboard"&&<Dashboard data={data} openOrder={(o)=>{setSelected(o);setModal("orderDetail")}} go={go}/>}
           {view==="orders"&&<Orders data={data} act={act} openOrder={(o)=>{setSelected(o);setModal("orderDetail")}} openProduction={openProduction} create={()=>setModal("createOrder")}/>}
           {view==="customers"&&<Customers data={data} open={(c)=>{setSelected(c);setModal("customerDetail")}} create={()=>setModal("createCustomer")}/>}
