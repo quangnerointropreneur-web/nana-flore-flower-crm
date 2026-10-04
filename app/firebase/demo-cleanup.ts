@@ -12,7 +12,7 @@ export function demoCleanupPlan(data: StoreData) {
   const orders = new Set(data.orders.filter(o => o.id >= 1 && o.id <= 30 && o.code === `FH-260815-${String(o.id).padStart(3, "0")}` && o.createdAt.startsWith("2026-08-") && o.mapsUrl === "https://maps.google.com").map(o => o.id));
   const retainedOrders = data.orders.filter(o => !orders.has(o.id));
   const customers = new Set(data.customers.filter(c => c.createdAt === seededAt && c.id <= 20 && c.email === `khach${c.id}@example.com` && !retainedOrders.some(o => o.customerId === c.id)).map(c => c.id));
-  const products = new Set(data.products.filter(p => p.createdAt === seededAt && sampleProducts[p.id - 1] === p.sku && !retainedOrders.some(o => o.itemProductId === p.id)).map(p => p.id));
+  const products = new Set(data.products.filter(p => p.createdAt === seededAt && sampleProducts[p.id - 1] === p.sku && !retainedOrders.some(o => o.itemProductId === p.id || o.items?.some(item => item.productId === p.id))).map(p => p.id));
   const staff = new Set(data.staff.filter(s => s.createdAt === seededAt && sampleStaff[s.id - 1] === s.email.toLowerCase()).map(s => s.id));
   const expenses = new Set(data.expenses.filter(e => { const sample = sampleExpenses[e.id - 1]; return sample && e.date === sample[0] && e.amount === sample[1] && e.vendor === sample[2] && e.createdAt === `${e.date} 09:00:00`; }).map(e => e.id));
   return {
