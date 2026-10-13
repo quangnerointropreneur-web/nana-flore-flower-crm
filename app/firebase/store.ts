@@ -6,6 +6,7 @@ import { getOrderItems, itemsSubtotal, itemsSummary, itemNetAmounts, parseOrderI
 import { resetConfirmedSalesData } from "./sales-reset";
 import { staffLoginDetails } from "./staff-login";
 import { recordOrderRefund } from "./refunds";
+import { changeExpenseCategory, expenseCategories, resolveExpenseCategory } from "../expense-categories";
 
 const root = ["flore_stores","default"] as const;
 const entityNames = ["customers","recipients","events","products","orders","payments","expenses","invoices","staff","production","deliveries","logs"] as const;
@@ -83,6 +84,16 @@ export async function applyFirebaseAction(data:StoreData,body:Record<string,unkn
     const guardedOrder = guarded ? getById(data.orders, guardId, "đơn hàng") : null;
     const pending: {ref: ReturnType<typeof entityDoc>; value: DocumentData}[] = [];
     if (action === "refundPayment") { await recordOrderRefund(body, actorName); return loadFirebaseStore(false); }
+    if(["saveExpenseCategory","setExpenseCategoryActive"].includes(action)){
+      const current=firebaseAuth.currentUser;
+      const member=current&&current.uid!==MANAGER_UID?await getDoc(staffAuthDoc(current.uid)):null;
+      if(!current||(current.uid!==MANAGER_UID&&(!member?.exists()||member.data().active!==true||member.data().role!=="manager")))throw new Error("Chỉ quản lý được thay đổi danh mục chi.");
+      await runTransaction(firestore,async transaction=>{
+        const ref=metaDoc("settings"),snapshot=await transaction.get(ref),settings=snapshot.exists()?snapshot.data() as StoreData["settings"]:buildSeedStore().settings;
+        transaction.set(ref,{...settings,expenseCategories:changeExpenseCategory(expenseCategories(settings),body)});
+      });
+      return loadFirebaseStore(false);
+    }
     if (["createStaff", "updateStaff", "deleteStaff"].includes(action)) {
       const current = firebaseAuth.currentUser;
       const account = current?.uid === MANAGER_UID ? null : current ? await getDoc(staffAuthDoc(current.uid)) : null;
@@ -255,9 +266,9 @@ export async function applyFirebaseAction(data:StoreData,body:Record<string,unkn
     }else if(action==="addPayment"){
       const orderId=Number(body.orderId),amount=money(body.amount),order=getById(data.orders,orderId,"đơn hàng"),delivery=data.deliveries.find(item=>item.orderId===orderId);if(amount<=0||amount>order.remaining)throw new Error("Số tiền thanh toán không hợp lệ");const paid=order.paid+amount,completed=paid>=order.total&&delivery?.status==="Đã giao",paymentStatus=paid>=order.total?"Đã thanh toán đủ":"Đã cọc",updated={...order,financeRevision:(order.financeRevision||0)+1,paid,remaining:order.total-paid,paymentStatus,status:completed?"Hoàn thành":order.status};put("orders",orderId,updated);if(delivery)put("deliveries",delivery.id,{...delivery,cod:updated.remaining});const id=nextId(data.payments),payment:Payment={id,orderId,orderCode:order.code,customerName:order.customerName,amount,method:clean(body.method,40),reference:clean(body.reference,80),notes:clean(body.notes,300),paidAt:now(),staffName:actorName};put("payments",id,payment);for(const invoice of data.invoices.filter(item=>item.orderId===orderId))put("invoices",invoice.id,{...invoice,paid,remaining:updated.remaining,paymentStatus});addLog(orderId,"Ghi nhận thanh toán",`${amount.toLocaleString("vi-VN")}đ qua ${payment.method}${completed?" · đơn đã hoàn thành":""}`);
     }else if(action==="createExpense"){
-      const date=clean(body.date,10)||today(),category=clean(body.category,80)||"Khác",amount=money(body.amount);if(amount<=0)throw new Error("Số tiền chi phí không hợp lệ");const id=nextId(data.expenses),expense:Expense={id,date,category,amount,vendor:clean(body.vendor,160),paymentMethod:clean(body.paymentMethod,40)||"Tiền mặt",notes:clean(body.notes,400),createdAt:now(),staffName:actorName};put("expenses",id,expense);addLog(0,"Ghi nhận chi phí",`${category} · ${amount.toLocaleString("vi-VN")}đ`,actorName);
+      const date=clean(body.date,10)||today(),amount=money(body.amount),settingsSnapshot=await getDoc(metaDoc("settings")),classification=resolveExpenseCategory(body,expenseCategories(settingsSnapshot.exists()?settingsSnapshot.data() as StoreData["settings"]:data.settings)),category=classification.category;if(amount<=0)throw new Error("Số tiền chi phí không hợp lệ");const id=nextId(data.expenses),expense:Expense={id,date,...classification,amount,vendor:clean(body.vendor,160),paymentMethod:clean(body.paymentMethod,40)||"Tiền mặt",notes:clean(body.notes,400),createdAt:now(),staffName:actorName};put("expenses",id,expense);addLog(0,"Ghi nhận chi phí",`${category} · ${amount.toLocaleString("vi-VN")}đ`,actorName);
     }else if(action==="updateExpense"){
-      const id=Number(body.id),old=getById(data.expenses,id,"chi phí"),amount=money(body.amount);if(amount<=0)throw new Error("Số tiền chi phí không hợp lệ");const expense:Expense={...old,date:clean(body.date,10)||old.date,category:clean(body.category,80)||old.category,amount,vendor:clean(body.vendor,160),paymentMethod:clean(body.paymentMethod,40)||old.paymentMethod,notes:clean(body.notes,400)};put("expenses",id,expense);addLog(0,"Cập nhật chi phí",`${expense.category} · ${amount.toLocaleString("vi-VN")}đ`,actorName);
+      const id=Number(body.id),old=getById(data.expenses,id,"chi phí"),amount=money(body.amount);if(amount<=0)throw new Error("Số tiền chi phí không hợp lệ");const settingsSnapshot=await getDoc(metaDoc("settings")),classification=resolveExpenseCategory(body,expenseCategories(settingsSnapshot.exists()?settingsSnapshot.data() as StoreData["settings"]:data.settings),old);const expense:Expense={...old,date:clean(body.date,10)||old.date,...classification,amount,vendor:clean(body.vendor,160),paymentMethod:clean(body.paymentMethod,40)||old.paymentMethod,notes:clean(body.notes,400)};put("expenses",id,expense);addLog(0,"Cập nhật chi phí",`${expense.category} · ${amount.toLocaleString("vi-VN")}đ`,actorName);
     }else if(action==="deleteExpense"){
       remove("expenses",Number(body.id));addLog(0,"Xóa chi phí",clean(body.label,120)||"Đã xóa một khoản chi",actorName);
     }else if(action==="createInvoice"){
@@ -270,7 +281,13 @@ export async function applyFirebaseAction(data:StoreData,body:Record<string,unkn
       const id=Number(body.id),status=clean(body.status,50),task=getById(data.deliveries,id,"vận đơn"),order=getById(data.orders,task.orderId,"đơn hàng"),orderStatus:Record<string,string>={"Chờ giao":"Chờ giao","Đã lấy hàng":"Đang giao","Đang giao":"Đang giao","Đã giao":order.paid>=order.total?"Hoàn thành":"Đã hoàn thiện","Giao thất bại":"Chờ giao"};put("deliveries",id,{...task,status});put("orders",order.id,{...order,status:orderStatus[status]||"Chờ giao"});const production=data.production.find(item=>item.orderId===order.id);if(production)put("production",production.id,{...production,status:status==="Đã giao"?"Đã hoàn thiện":production.status==="Đã hoàn thiện"?"Chờ kiểm tra":production.status});addLog(order.id,"Cập nhật vận chuyển",`Vận đơn: ${status}`);
     }else if(action==="updateDeliveryAssignment"){
       const id=Number(body.id),staffId=Number(body.staffId),task=getById(data.deliveries,id,"vận đơn"),staff=getById(data.staff,staffId,"nhân viên");put("deliveries",id,{...task,shipperId:staffId,shipperName:staff.name});addLog(task.orderId,"Phân công người giao",staff.name);
-    }else if(action==="saveSettings")batch.set(metaDoc("settings"),{shop:body.shop??{},invoice:body.invoice??{},workflow:body.workflow??{},notifications:body.notifications??{}} as DocumentData);
+    }else if(action==="saveSettings"){
+      await runTransaction(firestore,async transaction=>{
+        const ref=metaDoc("settings"),snapshot=await transaction.get(ref),settings=snapshot.exists()?snapshot.data():buildSeedStore().settings;
+        transaction.set(ref,{...settings,shop:body.shop??settings.shop,invoice:body.invoice??settings.invoice,workflow:body.workflow??settings.workflow,notifications:body.notifications??settings.notifications});
+      });
+      return loadFirebaseStore(false);
+    }
     else throw new Error("Thao tác không được hỗ trợ");
 
     if(guardedOrder){

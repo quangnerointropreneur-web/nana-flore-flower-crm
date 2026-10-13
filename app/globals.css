@@ -91,6 +91,32 @@ html, body, body *, button, input, select, textarea { font-family: var(--font-ui
 .payment-history > div { border-top: 1px solid var(--line); padding: 8px 0; font-size: 9px; }
 .payment-history small { display: block; color: var(--muted); font-size: 8px; line-height: 1.6; overflow-wrap: anywhere; }
 .report-cashflow { margin: 14px 0; }
+.category-edit-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin: 16px 0; padding: 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
+.category-edit-form .field { flex: 1 1 180px; min-width: 0; }
+.category-tree { display: flex; flex-direction: column; gap: 10px; }
+.category-tree > section { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.category-tree-row { display: flex; align-items: center; gap: 10px; padding: 11px 13px; background: var(--paper); }
+.category-tree-row > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.category-tree-row strong { font-size: 11px; }
+.category-tree-row small { font-size: 9px; color: var(--muted); }
+.category-tree-row button { flex-shrink: 0; }
+.category-tree-row .text-button { font-size: 9px; }
+.category-child { margin-left: 18px; border-top: 1px solid var(--line); border-left: 2px solid #d6e6dd; }
+.category-child strong { font-size: 10px; font-weight: 600; }
+.category-disabled { background: #f4f5f4; }
+.category-disabled .category-tree-row { background: transparent; }
+.category-empty { margin: 0; padding: 0 13px 12px; }
+.bulk-print-toolbar, .bulk-order-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 13px; border: 1px solid var(--line); background: var(--green-soft); border-radius: 9px; margin-bottom: 13px; font-size: 10px; }
+.bulk-print-toolbar > div { display: flex; flex-direction: column; flex: 1; gap: 5px; min-width: 180px; }
+.bulk-print-toolbar strong { font-size: 11px; }
+.bulk-print-toolbar small { font-size: 9px; color: var(--muted); line-height: 1.6; }
+.order-table input[type=checkbox] { accent-color: var(--green); width: 15px; height: 15px; cursor: pointer; }
+.bulk-order-bar > .primary-button { margin-left: auto; }
+.order-select-cell { width: 40px; }
+.page-actions > .expense-manage-button { display: inline-flex; }
+.bulk-work-print iframe { display: block; width: 100%; height: 65vh; min-height: 320px; border: 1px solid var(--line); border-radius: 9px; background: #edf1ee; }
+.expense-category-manager button:disabled, .bulk-work-print button:disabled { opacity: .55; cursor: not-allowed; }
+@media (max-width: 620px) { .category-tree-row { flex-wrap: wrap; gap: 7px; } .category-tree-row > div { min-width: 50%; } .category-edit-form > button { flex: 1; } .bulk-print-toolbar > button { width: 100%; justify-content: center; } }
 .staff-advanced .field-help { margin-top: 8px; line-height: 1.6; }
 .staff-account-form .danger-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 35px; padding: 0 11px; border: 1px solid #efc4cb; border-radius: 8px; background: var(--rose-soft); color: #8f3944; font-size: 10px; font-weight: 600; }
 .staff-account-form .login-error .danger-button { margin-left: 8px; }

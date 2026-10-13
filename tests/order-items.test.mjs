@@ -13,6 +13,8 @@ const staffLoginUri=uri(await compile('../app/firebase/staff-login.ts'));
 const financeUri=uri(await compile('../app/finance.ts'));
 const {paymentCashFlow,localDateTimeInput}=await import(financeUri);
 const cleanupUri=uri(await compile('../app/firebase/demo-cleanup.ts'));
+const categoriesUri=uri(await compile('../app/expense-categories.ts'));
+const categoriesApi=await import(categoriesUri);
 const line=(name,group,quantity,unitPrice)=>({id:name,name,group,quantity,unitPrice,productId:null,sku:'CUSTOM',tone:'',flowerTypes:''});
 
 test('two different products retain their own price, group and quantity',()=>{
@@ -55,7 +57,7 @@ let storeSource=await compile('../app/firebase/store.ts');
 const resetUri=uri((await compile('../app/firebase/sales-reset.ts')).replaceAll('"firebase/firestore"',JSON.stringify(firestoreUri)).replaceAll('"./client"',JSON.stringify(clientUri)));
 const {resetConfirmedSalesData,SALES_RESET_ID,SALES_COLLECTIONS}=await import(resetUri);
 const refundsUri=uri((await compile('../app/firebase/refunds.ts')).replaceAll('"firebase/firestore"',JSON.stringify(firestoreUri)).replaceAll('"./client"',JSON.stringify(clientUri)).replaceAll('"../finance"',JSON.stringify(financeUri)).replaceAll('"../order-items"',JSON.stringify(helpersUri)));
-for(const [name,value] of [['firebase/firestore',firestoreUri],['./client',clientUri],['./seed',seedUri],['./sales-reset',resetUri],['./staff-login',staffLoginUri],['./refunds',refundsUri],['../order-items',helpersUri]])storeSource=storeSource.replaceAll(`"${name}"`,JSON.stringify(value));
+for(const [name,value] of [['firebase/firestore',firestoreUri],['./client',clientUri],['./seed',seedUri],['./sales-reset',resetUri],['./staff-login',staffLoginUri],['./refunds',refundsUri],['../order-items',helpersUri],['../expense-categories',categoriesUri]])storeSource=storeSource.replaceAll(`"${name}"`,JSON.stringify(value));
 const {applyFirebaseAction,loadFirebaseStore}=await import(uri(storeSource));const {buildSeedStore}=await import(seedUri);
 
 test('staff usernames create real credentials; edits and revocation require no admin endpoint and preserve history',async()=>{
@@ -223,6 +225,64 @@ test('new product groups persist once and reject case-insensitive duplicates',as
   globalThis.__flowerOrderDocuments=new Map();let data=buildSeedStore();
   data=await applyFirebaseAction(data,{action:'createProductGroup',name:'Vòng hoa'});assert.ok(data.settings.workflow.productGroups.includes('Vòng hoa'));
   await assert.rejects(()=>applyFirebaseAction(data,{action:'createProductGroup',name:' vòng HOA '}),/đã tồn tại/);
+});
+
+test('expense categories support two levels, stable renaming, archiving and root totals',()=>{
+  const {defaultExpenseCategories,changeExpenseCategory,resolveExpenseCategory,expenseCategoryInfo,expenseInCategory,summarizeExpenseGroups}=categoriesApi;
+  let categories=defaultExpenseCategories();
+  assert.deepEqual(categories.map(row=>row.name),['Chi phí cửa hàng','Nguyên liệu','Quả','Phụ kiện']);
+  categories=changeExpenseCategory(categories,{name:'Điện nước',parentId:'expense-shop'});
+  const child=categories.at(-1);
+  assert.throws(()=>changeExpenseCategory(categories,{name:' điện NƯỚC ',parentId:'expense-shop'}),/đã tồn tại/);
+  assert.throws(()=>changeExpenseCategory(categories,{name:'Cấp ba',parentId:child.id}),/hai cấp/);
+  const expense={id:1,amount:120000,...resolveExpenseCategory({categoryId:child.id},categories)};
+  const generic={id:2,amount:80000,...resolveExpenseCategory({categoryId:'expense-shop'},categories)};
+  assert.ok(expenseInCategory(expense,'expense-shop',categories));
+  assert.equal(summarizeExpenseGroups([expense,generic],categories)[0].value,200000);
+  categories=changeExpenseCategory(categories,{id:child.id,name:'Tiền điện & nước',parentId:'expense-shop'});
+  assert.equal(expenseCategoryInfo(expense,categories).path,'Chi phí cửa hàng / Tiền điện & nước');
+  categories=changeExpenseCategory(categories,{action:'setExpenseCategoryActive',id:'expense-shop',active:false});
+  assert.throws(()=>resolveExpenseCategory({categoryId:child.id},categories),/ngừng sử dụng/);
+  assert.equal(resolveExpenseCategory({categoryId:child.id},categories,expense).categoryId,child.id);
+  assert.equal(summarizeExpenseGroups([expense],categories)[0].value,120000);
+  assert.equal(resolveExpenseCategory({category:expense.category},categories,expense).categoryId,child.id);
+  assert.equal(resolveExpenseCategory({category:'Khoản cũ khác'},categories,expense).categoryId,'');
+  assert.equal(expenseCategoryInfo({category:'Mẫu cũ'},categories).path,'Mẫu cũ');
+});
+
+test('category changes persist and general settings never overwrite the dictionary',async()=>{
+  const root='flore_stores/default/';globalThis.__flowerOrderDocuments=new Map();
+  let data=buildSeedStore();
+  data=await applyFirebaseAction(data,{action:'saveExpenseCategory',name:'Điện nước',parentId:'expense-shop'});
+  const dictionary=structuredClone(data.settings.expenseCategories),child=dictionary.at(-1);
+  data=await applyFirebaseAction(data,{action:'createExpense',categoryId:child.id,amount:120000,date:'2026-10-13'});
+  assert.equal(data.expenses[0].categoryId,child.id);
+  data=await applyFirebaseAction(data,{action:'saveSettings',shop:{...data.settings.shop,name:'Cửa hàng QA'}});
+  assert.deepEqual(data.settings.expenseCategories,dictionary);
+  data=await applyFirebaseAction(data,{action:'setExpenseCategoryActive',id:child.id,active:false});
+  await assert.rejects(applyFirebaseAction(data,{action:'createExpense',categoryId:child.id,amount:5}),/ngừng sử dụng/);
+  data=await applyFirebaseAction(data,{action:'updateExpense',id:data.expenses[0].id,categoryId:child.id,amount:150000,date:'2026-10-13'});
+  assert.equal(data.expenses.length,1);assert.equal(data.expenses[0].amount,150000);
+  const client=await import(clientUri),owner=client.firebaseAuth.currentUser;
+  client.firebaseAuth.currentUser={uid:'sales-category-qa'};
+  globalThis.__flowerOrderDocuments.set(root+'staffAuth/sales-category-qa',{active:true,role:'sales'});
+  try{await assert.rejects(applyFirebaseAction(data,{action:'saveExpenseCategory',name:'Không được phép'}),/Chỉ quản lý/)}finally{client.firebaseAuth.currentUser=owner}
+});
+
+test('A4 production slips print all items, safely escape text, sort dates, and never mutate sales records',async()=>{
+  const source=(await compile('../app/work-order-print.ts')).replaceAll('"./order-items"',JSON.stringify(helpersUri));
+  const {buildWorkOrderPrintHtml,workOrdersForPrint}=await import(uri(source));
+  const data=buildSeedStore(),order={id:1,code:'QA-1',status:'Mới',deliveryType:'pickup',deliveryDate:'2026-10-14',deliveryTime:'10:00',customerName:'<script>alert(1)</script>',customerPhone:'0900000000',cardMessage:'Dòng 1\nDòng 2 & hoa',items:[line('Bó hồng','Hoa bó',1,987654),line('Giỏ quả','Quả',2,765432)]};
+  const early={...order,id:2,code:'QA-2',deliveryDate:'2026-10-13'},cancelled={...order,id:3,status:'Hủy'};
+  const before=structuredClone(data),orders=[order,early,cancelled,order];
+  assert.deepEqual(workOrdersForPrint(orders).map(row=>row.id),[2,1]);
+  const html=buildWorkOrderPrintHtml(orders,data);
+  for(const text of ['size:A4 portrait','break-before:page','Bó hồng','Giỏ quả','Người làm:','Người vận đơn:','Nội dung thiệp','&lt;script&gt;','Dòng 2 &amp; hoa'])assert.ok(html.includes(text),text);
+  assert.doesNotMatch(html,/<script>|987654|765432|QA-3/);
+  assert.equal((html.match(/class="work-sheet"/g)||[]).length,2);
+  assert.ok(html.indexOf('QA-2')<html.indexOf('QA-1'));assert.deepEqual(data,before);
+  const long=buildWorkOrderPrintHtml([{...order,items:Array.from({length:100},(_,i)=>line('Sản phẩm '+(i+1),'Hoa bó',1,10))}],data);
+  assert.match(long,/Sản phẩm 100/);assert.throws(()=>buildWorkOrderPrintHtml([cancelled],data),/Chọn ít nhất/);
 });
 
 test('invoice PDF includes every product and paginates long orders',async()=>{
