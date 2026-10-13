@@ -48,7 +48,7 @@ export function productStatistics(orders: Order[], products: Product[] = []) {
   const rows = new Map<string, { name: string; group: string; quantity: number; gross: number; revenue: number; orderIds: Set<number> }>();
   for (const order of orders) {
     if (order.status === "Hủy") continue;
-    const items = getOrderItems(order, products), amounts = itemNetAmounts(items, order.discount);
+    const items = getOrderItems(order, products), amounts = itemNetAmounts(items, order.discount + (order.refundDiscount || 0));
     items.forEach((item, index) => {
       const key = JSON.stringify([item.name.trim().toLocaleLowerCase("vi"), item.group.trim().toLocaleLowerCase("vi")]);
       const row = rows.get(key) || { name: item.name, group: item.group, quantity: 0, gross: 0, revenue: 0, orderIds: new Set<number>() };

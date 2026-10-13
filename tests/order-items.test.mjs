@@ -10,6 +10,8 @@ const helpersUri=uri(await compile('../app/order-items.ts'));
 const {parseOrderItems,getOrderItems,itemsSubtotal,itemNetAmounts,productStatistics}=await import(helpersUri);
 const seedUri=uri(await compile('../app/firebase/seed.ts'));
 const staffLoginUri=uri(await compile('../app/firebase/staff-login.ts'));
+const financeUri=uri(await compile('../app/finance.ts'));
+const {paymentCashFlow,localDateTimeInput}=await import(financeUri);
 const cleanupUri=uri(await compile('../app/firebase/demo-cleanup.ts'));
 const line=(name,group,quantity,unitPrice)=>({id:name,name,group,quantity,unitPrice,productId:null,sku:'CUSTOM',tone:'',flowerTypes:''});
 
@@ -52,7 +54,8 @@ const clientUri=uri(`export const firestore={};export const MANAGER_UID='kyEi7Wd
 let storeSource=await compile('../app/firebase/store.ts');
 const resetUri=uri((await compile('../app/firebase/sales-reset.ts')).replaceAll('"firebase/firestore"',JSON.stringify(firestoreUri)).replaceAll('"./client"',JSON.stringify(clientUri)));
 const {resetConfirmedSalesData,SALES_RESET_ID,SALES_COLLECTIONS}=await import(resetUri);
-for(const [name,value] of [['firebase/firestore',firestoreUri],['./client',clientUri],['./seed',seedUri],['./sales-reset',resetUri],['./staff-login',staffLoginUri],['../order-items',helpersUri]])storeSource=storeSource.replaceAll(`"${name}"`,JSON.stringify(value));
+const refundsUri=uri((await compile('../app/firebase/refunds.ts')).replaceAll('"firebase/firestore"',JSON.stringify(firestoreUri)).replaceAll('"./client"',JSON.stringify(clientUri)).replaceAll('"../finance"',JSON.stringify(financeUri)).replaceAll('"../order-items"',JSON.stringify(helpersUri)));
+for(const [name,value] of [['firebase/firestore',firestoreUri],['./client',clientUri],['./seed',seedUri],['./sales-reset',resetUri],['./staff-login',staffLoginUri],['./refunds',refundsUri],['../order-items',helpersUri]])storeSource=storeSource.replaceAll(`"${name}"`,JSON.stringify(value));
 const {applyFirebaseAction,loadFirebaseStore}=await import(uri(storeSource));const {buildSeedStore}=await import(seedUri);
 
 test('staff usernames create real credentials; edits and revocation require no admin endpoint and preserve history',async()=>{
@@ -156,6 +159,66 @@ test('create, edit, invoice and delete keep every item and payment balance consi
   data=await applyFirebaseAction(data,{action:'addPayment',orderId:id,amount:1250000,method:'Tiền mặt'});assert.equal(data.orders[0].remaining,0);assert.equal(data.invoices[0].remaining,0);
   data=await applyFirebaseAction(data,{action:'deleteOrder',id});for(const name of ['orders','invoices','payments','production','deliveries'])assert.equal(data[name].length,0);
 });
+test('partial refunds preserve receipts, sync all balances, are idempotent and allow later editing',async()=>{
+  globalThis.__flowerOrderDocuments=new Map();let data=buildSeedStore();
+  data=await applyFirebaseAction(data,{action:'createProduct',name:'Hoa',sku:'HB-1',category:'Hoa bó',price:1000000});
+  const base={customerName:'Khách hoàn',customerPhone:'0900123456',deliveryType:'pickup',deliveryDate:'2026-10-13',deliveryTime:'10:30',source:'Zalo',discount:0,paid:1000000,items:[{...line('Bó hoa','Hoa bó',1,1000000),productId:data.products[0].id}]};
+  data=await applyFirebaseAction(data,{action:'createOrder',...base});const id=data.orders[0].id;
+  data=await applyFirebaseAction(data,{action:'createInvoice',orderId:id});
+  data=await applyFirebaseAction(data,{action:'updateDeliveryStatus',id:data.deliveries[0].id,status:'Đã giao'});
+  const stale=structuredClone(data),receipt=structuredClone(data.payments[0]);
+  const body={action:'refundPayment',orderId:id,amount:500000,adjustOrder:true,reason:'Hoa không đúng yêu cầu',method:'Chuyển khoản',refundedAt:localDateTimeInput(new Date(Date.now()-3600000)),requestId:crypto.randomUUID()};
+  data=await applyFirebaseAction(data,body);
+  const order=data.orders[0];assert.equal(order.total,500000);assert.equal(order.paid,500000);assert.equal(order.refunded,500000);assert.equal(order.remaining,0);assert.equal(order.status,'Hoàn thành');
+  assert.deepEqual(data.payments.find(row=>row.id===receipt.id),receipt);
+  assert.equal(data.payments.filter(row=>row.kind==='refund').length,1);
+  assert.equal(data.invoices[0].total,500000);assert.equal(data.invoices[0].refunded,500000);assert.equal(data.invoices[0].paid,500000);assert.equal(data.deliveries[0].cod,0);assert.equal(data.customers[0].totalSpent,500000);
+  assert.equal(data.products[0].revenue,500000);assert.equal(productStatistics(data.orders)[0].revenue,500000);
+  assert.deepEqual(paymentCashFlow(data.payments),{received:1000000,refunded:500000,net:500000});
+  data=await applyFirebaseAction(stale,body);assert.equal(data.payments.length,2,'lost acknowledgements cannot double-refund');
+  await assert.rejects(applyFirebaseAction(data,{...body,amount:100000}),/đã được ghi nhận/);
+  const before=structuredClone([...globalThis.__flowerOrderDocuments]);
+  for(const invalid of [{amount:600000},{amount:-1},{amount:0},{amount:1.5},{reason:''},{method:'invalid'},{refundedAt:'2099-01-01T12:00'}])await assert.rejects(applyFirebaseAction(stale,{...body,requestId:crypto.randomUUID(),...invalid}));
+  assert.deepEqual([...globalThis.__flowerOrderDocuments],before);
+  await assert.rejects(applyFirebaseAction(stale,{action:'updateOrder',id,...base}),/vừa thay đổi/);
+  await assert.rejects(applyFirebaseAction(stale,{action:'updateDeliveryStatus',id:stale.deliveries[0].id,status:'Đang giao'}),/vừa thay đổi/);
+  data=await applyFirebaseAction(data,{action:'updateOrder',id,...base});
+  assert.equal(data.orders[0].total,500000);assert.equal(data.orders[0].refundDiscount,500000);assert.equal(data.invoices[0].refunded,500000);
+  data=await applyFirebaseAction(data,{...body,requestId:crypto.randomUUID(),amount:500000});
+  assert.equal(data.orders[0].total,0);assert.equal(data.orders[0].paid,0);assert.equal(data.orders[0].paymentStatus,'Đã hoàn tiền');assert.equal(data.invoices[0].refunded,1000000);assert.equal(data.products[0].revenue,0);
+  await assert.rejects(applyFirebaseAction(data,{...body,requestId:crypto.randomUUID(),amount:1}),/không vượt/);
+});
+
+test('cash-only refunds reopen debt; subsequent payments and invoice creation retain refund totals',async()=>{
+  globalThis.__flowerOrderDocuments=new Map();let data=buildSeedStore();
+  data=await applyFirebaseAction(data,{action:'createOrder',customerName:'Khách',customerPhone:'0900123000',deliveryType:'pickup',deliveryDate:'2026-10-13',deliveryTime:'10:00',paid:1000000,items:[line('Hoa','Hoa bó',1,1000000)]});
+  const id=data.orders[0].id;data=await applyFirebaseAction(data,{action:'updateDeliveryStatus',id:data.deliveries[0].id,status:'Đã giao'});
+  data=await applyFirebaseAction(data,{action:'refundPayment',orderId:id,amount:500000,adjustOrder:false,reason:'Trả lại tiền trước',method:'Tiền mặt',refundedAt:localDateTimeInput(),requestId:crypto.randomUUID()});
+  assert.equal(data.orders[0].total,1000000);assert.equal(data.orders[0].remaining,500000);assert.equal(data.orders[0].status,'Đã hoàn thiện');assert.equal(data.deliveries[0].cod,500000);
+  data=await applyFirebaseAction(data,{action:'createInvoice',orderId:id});assert.equal(data.invoices[0].refunded,500000);
+  data=await applyFirebaseAction(data,{action:'addPayment',orderId:id,amount:500000,method:'Tiền mặt'});
+  assert.equal(data.orders[0].paid,1000000);assert.equal(data.orders[0].refunded,500000);assert.equal(data.orders[0].status,'Hoàn thành');assert.equal(data.invoices[0].remaining,0);
+  assert.deepEqual(paymentCashFlow(data.payments),{received:1500000,refunded:500000,net:1000000});
+  const client=await import(clientUri),owner=client.firebaseAuth.currentUser;
+  try{client.firebaseAuth.currentUser={uid:'not-manager'};await assert.rejects(applyFirebaseAction(data,{action:'refundPayment'}),/Chỉ quản lý/)}finally{client.firebaseAuth.currentUser=owner}
+});
+
+test('stale collection cannot overwrite a newer refund balance',async()=>{
+  globalThis.__flowerOrderDocuments=new Map();let data=buildSeedStore();
+  data=await applyFirebaseAction(data,{action:'createOrder',customerName:'Khách',customerPhone:'0900123000',deliveryType:'pickup',deliveryDate:'2026-10-13',deliveryTime:'10:00',paid:600000,items:[line('Hoa','Hoa bó',1,1000000)]});
+  const id=data.orders[0].id,stale=structuredClone(data);
+  data=await applyFirebaseAction(data,{action:'refundPayment',orderId:id,amount:100000,adjustOrder:true,reason:'Giảm giá',method:'Tiền mặt',refundedAt:localDateTimeInput(),requestId:crypto.randomUUID()});
+  await assert.rejects(applyFirebaseAction(stale,{action:'addPayment',orderId:id,amount:400000,method:'Tiền mặt'}),/vừa thay đổi/);
+  assert.equal(globalThis.__flowerOrderDocuments.get('flore_stores/default/orders/'+id).paid,500000);
+  data=await applyFirebaseAction(data,{action:'addPayment',orderId:id,amount:400000,method:'Tiền mặt'});assert.equal(data.orders[0].paid,900000);assert.equal(data.orders[0].refunded,100000);
+});
+
+test('reports count receipts and refunds in their own Vietnam-time periods, not order delivery month',()=>{
+  const rows=[{amount:1000000,paidAt:'2026-09-30 10:00:00'},{kind:'refund',amount:500000,paidAt:'2026-09-30 18:00:00'}];
+  assert.deepEqual(paymentCashFlow(rows,'2026-09-01','2026-09-30'),{received:1000000,refunded:0,net:1000000});
+  assert.deepEqual(paymentCashFlow(rows,'2026-10-01','2026-10-31'),{received:0,refunded:500000,net:-500000});
+});
+
 test('new product groups persist once and reject case-insensitive duplicates',async()=>{
   globalThis.__flowerOrderDocuments=new Map();let data=buildSeedStore();
   data=await applyFirebaseAction(data,{action:'createProductGroup',name:'Vòng hoa'});assert.ok(data.settings.workflow.productGroups.includes('Vòng hoa'));
@@ -172,5 +235,7 @@ test('invoice PDF includes every product and paginates long orders',async()=>{
   const pdf=buildInvoicePdf(invoice,buildSeedStore().settings);
   assert.ok(pdf.getNumberOfPages()>1);const content=pdf.output();
   assert.match(content,/Product 1 /);assert.match(content,/Product 100 /);assert.match(content,/TONG THANH TOAN/);
+  const adjusted=buildInvoicePdf({...invoice,total:5000000,paid:5000000,refunded:5000000,refundDiscount:5000000,remaining:0},buildSeedStore().settings).output();
+  assert.match(adjusted,/Dieu chinh do hoan tien/);assert.match(adjusted,/Da hoan khach/);assert.match(adjusted,/Tien thuc giu/);
   delete globalThis.__flowerPdfConstructor;
 });

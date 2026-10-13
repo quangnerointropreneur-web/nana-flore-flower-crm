@@ -23,13 +23,17 @@ export function buildInvoicePdf(invoice:Invoice,settings:StoreData["settings"]){
     pdf.setFont("helvetica","bold");pdf.text(lines,12,y);pdf.text(money(item.quantity*item.unitPrice),136,y,{align:"right"});
     y+=lines.length*5;pdf.setFont("helvetica","normal");pdf.text(`SL: ${item.quantity}  x  ${money(item.unitPrice)}`,12,y);y+=8;pdf.line(12,y,136,y);y+=5;
   });
-  ensureSpace(60);
+  ensureSpace(90);
   const totalLine=(label:string,amount:number,bold=false)=>{pdf.setFont("helvetica",bold?"bold":"normal");pdf.text(label,12,y);pdf.text(money(amount),136,y,{align:"right"});y+=7};
   totalLine("Tam tinh",invoice.subtotal);
   if(settings.invoice.showDiscount)totalLine("Giam gia",-invoice.discount);
   if(settings.invoice.showShipping)totalLine("Phi giao hang",invoice.shippingFee);
   if(invoice.surcharge)totalLine("Phu thu",invoice.surcharge);
-  totalLine("TONG THANH TOAN",invoice.total,true);totalLine("Da thanh toan",invoice.paid);totalLine("Con lai",invoice.remaining);
+  if(invoice.refundDiscount)totalLine("Dieu chinh do hoan tien",-invoice.refundDiscount);
+  totalLine("TONG THANH TOAN",invoice.total,true);
+  totalLine("Da thu tu khach",invoice.paid+(invoice.refunded||0));
+  if(invoice.refunded){totalLine("Da hoan khach",-invoice.refunded);totalLine("Tien thuc giu",invoice.paid);}
+  totalLine("Con lai",invoice.remaining);
   ensureSpace(15);y+=5;pdf.setFont("helvetica","italic");pdf.text(plain(settings.shop.footer),74,y,{align:"center"});
   return pdf;
 }

@@ -82,6 +82,15 @@ html, body, body *, button, input, select, textarea { font-family: var(--font-ui
 .toast-error svg, .account-action-error svg { flex-shrink: 0; }
 .account-action-error { display: flex; align-items: flex-start; gap: 8px; padding: 12px; margin-bottom: 14px; border: 1px solid #efc4cb; border-radius: 8px; background: var(--rose-soft); color: #8f3944; font-size: 10px; line-height: 1.6; }
 .staff-advanced { margin-top: 14px; }
+.refund-choice { display: flex; align-items: flex-start; gap: 9px; margin: 15px 0; font-size: 10px; line-height: 1.6; }
+.refund-choice input { margin-top: 3px; accent-color: var(--green); }
+.refund-choice span { display: flex; flex-direction: column; gap: 4px; }
+.refund-choice small { color: var(--muted); font-size: 9px; }
+.refund-preview { padding: 13px; margin-top: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--green-soft); font-size: 10px; line-height: 1.6; }
+.refund-preview p, .payment-history p { display: flex; justify-content: space-between; gap: 12px; margin: 6px 0; }
+.payment-history > div { border-top: 1px solid var(--line); padding: 8px 0; font-size: 9px; }
+.payment-history small { display: block; color: var(--muted); font-size: 8px; line-height: 1.6; overflow-wrap: anywhere; }
+.report-cashflow { margin: 14px 0; }
 .staff-advanced .field-help { margin-top: 8px; line-height: 1.6; }
 .staff-account-form .danger-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 35px; padding: 0 11px; border: 1px solid #efc4cb; border-radius: 8px; background: var(--rose-soft); color: #8f3944; font-size: 10px; font-weight: 600; }
 .staff-account-form .login-error .danger-button { margin-left: 8px; }
